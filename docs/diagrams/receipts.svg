@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 260" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#000"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="940" height="260" fill="#fff"/>
+  <g font-size="14" font-weight="bold" text-anchor="middle" fill="#000">
+    <rect x="20" y="60" width="150" height="64" rx="8" fill="#fff" stroke="#000" stroke-width="1.5"/>
+    <text x="95" y="86">supervisor</text>
+    <text x="95" y="105" font-size="12" font-weight="normal" fill="#555">hash + signature</text>
+
+    <rect x="200" y="60" width="150" height="64" rx="8" fill="#fff" stroke="#000" stroke-width="1.5"/>
+    <text x="275" y="86">robotics</text>
+    <text x="275" y="105" font-size="12" font-weight="normal" fill="#555">prev = supervisor hash</text>
+
+    <rect x="380" y="78" width="50" height="28" rx="8" fill="#fff" stroke="#000" stroke-width="1.5"/>
+    <text x="405" y="97">…</text>
+
+    <rect x="460" y="60" width="170" height="64" rx="8" fill="#fff" stroke="#000" stroke-width="1.5"/>
+    <text x="545" y="86">verify_log_chain</text>
+    <text x="545" y="105" font-size="12" font-weight="normal" fill="#555">links · hashes · signatures</text>
+
+    <rect x="660" y="30" width="180" height="56" rx="8" fill="#fff" stroke="#000" stroke-width="1.5"/>
+    <text x="750" y="52">summarize_log</text>
+    <text x="750" y="71" font-size="12" font-weight="normal" fill="#555">counts by kind · span</text>
+
+    <rect x="660" y="130" width="180" height="64" rx="8" fill="#fff" stroke="#000" stroke-width="1.5"/>
+    <text x="750" y="154">receipt bundle</text>
+    <text x="750" y="173" font-size="12" font-weight="normal" fill="#555">records + metrics → auditors</text>
+  </g>
+  <g stroke="#000" stroke-width="1.5" fill="none">
+    <line x1="172" y1="92" x2="198" y2="92" marker-end="url(#arr)"/>
+    <line x1="352" y1="92" x2="378" y2="92" marker-end="url(#arr)"/>
+    <line x1="432" y1="92" x2="458" y2="92" marker-end="url(#arr)"/>
+    <line x1="600" y1="60" x2="700" y2="52" marker-end="url(#arr)"/>
+    <line x1="600" y1="110" x2="700" y2="150" marker-end="url(#arr)"/>
+  </g>
+  <g font-size="12" fill="#555">
+    <text x="470" y="230" text-anchor="middle">summarize first, then verify integrity; ship the bundle — not raw JSONL — to auditors</text>
+  </g>
+</svg>
