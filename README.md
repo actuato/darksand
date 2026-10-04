@@ -3,9 +3,10 @@
 Action → Run → Proof for robots: deterministic behavior-tree missions with a
 safety containment halt, signed run policy, and a fleet control plane.
 
-Extracted from `igris` (`igris-runtime` + `igris-overture`) at commit
-`7e6098ef9`, 2026-10-04, under owner authorization. Both repos are MIT
-licensed; original copyright headers are preserved in extracted files.
+Rebranded to Darksand; originally extracted from upstream runtime +
+control-plane repos at commit `7e6098ef9`, 2026-10-04, under owner
+authorization. Both repos are MIT licensed; original copyright headers are
+preserved in extracted files.
 
 ## Layout
 
@@ -24,17 +25,17 @@ licensed; original copyright headers are preserved in extracted files.
 * `crates/darksand-recovery` — Nav2 recovery behaviors (spin, backup,
   clear-costmap) plus generic retry classification.
 * `crates/darksand-policy` — standalone policy service (SQLite, no
-  Overture/Clerk/Postgres): versioned robot-mode policies
+  Postgres/Clerk dependency): versioned robot-mode policies
   (`supervised|active|disabled`), runtime allow-lists, Ed25519-signed
   lifecycle commands with nonce replay protection, audit trail.
   Run: `DARKSAND_POLICY_KEYS="tenant:key" cargo run -p darksand-policy`.
 * `crates/darksand-fleet` — fleet agent: register / config-sync / signed
   telemetry upload. Reports real system stats (mock values only in
-  explicit `mock_mode`); `.igris/` key material is never committed.
+  explicit `mock_mode`); `.darksand/` key material is never committed.
 * `crates/darksand-swarm`, `darksand-sensors`, `darksand-simulation` —
   coordination primitives, GPIO/camera/lidar, sim envs
   (`virtual_swarm` implemented; `gazebo`/`isaac_sim` are config names only).
-* `reference/` — verbatim upstream sources not yet promoted: full BT tree
+* `reference/` — rebranded upstream sources not yet promoted: full BT tree
   (`btree-ros/`), server `Ros2Manager` wiring, Go policy routes + SQL
   migrations (`policy/`), preview docs.
 * `config/robotics.example.json5` — all sections disabled by default.

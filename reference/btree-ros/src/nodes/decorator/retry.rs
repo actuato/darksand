@@ -33,7 +33,7 @@ use serde_json::Value;
 /// ## Basic Retry
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
@@ -52,7 +52,7 @@ use serde_json::Value;
 /// ## Retry with Nested Action
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
@@ -89,7 +89,7 @@ impl Retry {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
+    /// use darksand_btree::prelude::*;
     ///
     /// let child = Box::new(SetBlackboard::new("action", "key", "value"));
     /// let retry = Retry::new("retry_action", child, 3);

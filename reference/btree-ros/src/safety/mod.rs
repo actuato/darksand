@@ -29,7 +29,7 @@
 //! ## Watchdog for Long Operations
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //! use std::time::Duration;
 //!
 //! # #[tokio::main]
@@ -57,7 +57,7 @@
 //! ## Detecting Infinite Loops
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //! use std::time::Duration;
 //!
 //! # #[tokio::main]

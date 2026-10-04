@@ -1,8 +1,8 @@
 -- ============================================================================
--- IGRIS FLEET MANAGEMENT SCHEMA
+-- DARKSAND FLEET MANAGEMENT SCHEMA
 -- ============================================================================
 -- Version: 1.0.0
--- Purpose: Enable centralized fleet management for distributed Igris Runtime instances
+-- Purpose: Enable centralized fleet management for distributed Darksand Runtime instances
 -- ============================================================================
 
 -- Enable UUID extension for primary keys
@@ -10,7 +10,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ============================================================================
 -- TABLE: fleet_agents
--- Purpose: Track registered Igris Runtime instances
+-- Purpose: Track registered Darksand Runtime instances
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS fleet_agents (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -421,7 +421,7 @@ VALUES (
 -- COMMENTS: Documentation
 -- ============================================================================
 
-COMMENT ON TABLE fleet_agents IS 'Registry of all Igris Runtime instances in the fleet';
+COMMENT ON TABLE fleet_agents IS 'Registry of all Darksand Runtime instances in the fleet';
 COMMENT ON TABLE fleet_configs IS 'Configuration versions for fleet management';
 COMMENT ON TABLE fleet_telemetry IS 'Telemetry data collected from fleet agents';
 COMMENT ON TABLE fleet_events IS 'Audit trail for fleet management operations';

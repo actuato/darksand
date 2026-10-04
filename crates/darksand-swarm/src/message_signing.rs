@@ -14,7 +14,7 @@
 //! # HTTP header convention
 //!
 //! When the envelope is serialised for HTTP transport the signature is also
-//! available as the `X-Igris-Swarm-Sig` request header (Base64 Ed25519).
+//! available as the `X-Darksand-Swarm-Sig` request header (Base64 Ed25519).
 
 use anyhow::Result;
 use base64::Engine;
@@ -63,7 +63,7 @@ impl SignedSwarmEnvelope {
         })
     }
 
-    /// Return the value suitable for the `X-Igris-Swarm-Sig` HTTP header.
+    /// Return the value suitable for the `X-Darksand-Swarm-Sig` HTTP header.
     pub fn header_value(&self) -> &str {
         &self.signature
     }

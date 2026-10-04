@@ -31,10 +31,10 @@ pub struct ExecutionResult {
     pub deadline_exceeded: bool,
 
     /// Last WAL checkpoint from this execution (when WAL session was active).
-    /// Overture persists this so execution can resume on a new runtime if this
+    /// Darksand persists this so execution can resume on a new runtime if this
     /// one crashes before the next scheduled checkpoint.
     #[cfg(feature = "wal")]
-    pub checkpoint: Option<igris_wal::BtCheckpointPayload>,
+    pub checkpoint: Option<darksand_wal::BtCheckpointPayload>,
 }
 
 impl ExecutionResult {
@@ -73,7 +73,7 @@ impl ExecutionResult {
 
     /// Attach a WAL checkpoint to the result.
     #[cfg(feature = "wal")]
-    pub fn with_checkpoint(mut self, cp: igris_wal::BtCheckpointPayload) -> Self {
+    pub fn with_checkpoint(mut self, cp: darksand_wal::BtCheckpointPayload) -> Self {
         self.checkpoint = Some(cp);
         self
     }

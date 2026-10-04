@@ -39,8 +39,8 @@
 //! ## Basic Usage
 //!
 //! ```
-//! use igris_btree::prelude::*;
-//! use igris_btree::visualizer::{TreeVisualizer, VisualizerConfig};
+//! use darksand_btree::prelude::*;
+//! use darksand_btree::visualizer::{TreeVisualizer, VisualizerConfig};
 //!
 //! # #[tokio::main]
 //! # async fn main() -> anyhow::Result<()> {
@@ -62,7 +62,7 @@
 //! ## With Custom Config
 //!
 //! ```
-//! use igris_btree::visualizer::{TreeVisualizer, VisualizerConfig};
+//! use darksand_btree::visualizer::{TreeVisualizer, VisualizerConfig};
 //!
 //! let config = VisualizerConfig {
 //!     enabled: true,

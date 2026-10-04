@@ -1,4 +1,4 @@
-//! Swarm Intelligence for Igris Runtime
+//! Swarm Intelligence for Darksand Runtime
 //!
 //! Provides advanced swarm coordination features for multi-agent systems.
 //!

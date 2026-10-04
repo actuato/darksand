@@ -1,11 +1,11 @@
-//! Integration tests for igris-btree
+//! Integration tests for darksand-btree
 //!
 //! These tests verify end-to-end behavior of complex trees with multiple nodes,
 //! hybrid LLM flows, and real-world scenarios.
 
-use igris_btree::nodes::composite::ParallelPolicy;
-use igris_btree::prelude::*;
-use igris_btree::MockLlmProvider;
+use darksand_btree::nodes::composite::ParallelPolicy;
+use darksand_btree::prelude::*;
+use darksand_btree::MockLlmProvider;
 use std::sync::Arc;
 use std::time::Duration;
 

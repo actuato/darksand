@@ -1,4 +1,4 @@
-//! Sensor & Actuator Tooling for Igris Runtime
+//! Sensor & Actuator Tooling for Darksand Runtime
 //!
 //! Provides interfaces for interacting with hardware sensors and actuators
 //! commonly used in robotics and edge AI applications.

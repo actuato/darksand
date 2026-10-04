@@ -737,7 +737,7 @@ func aiToolReplayRouteColumns() []string {
 func TestReplayRoboticsReceiptsRouteVerifiesRuntimeSignatureWithPublicKey(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
-	t.Setenv("IGRIS_RUNTIME_PUBLIC_KEY", hex.EncodeToString(publicKey))
+	t.Setenv("DARKSAND_RUNTIME_PUBLIC_KEY", hex.EncodeToString(publicKey))
 
 	taskID := uuid.New()
 	persistedAt := time.Unix(1_900_300_500, 0).UTC()

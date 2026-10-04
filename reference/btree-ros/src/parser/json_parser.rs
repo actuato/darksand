@@ -80,8 +80,8 @@ use tracing::debug;
 /// ## Parse a Simple Action
 ///
 /// ```
-/// use igris_btree::prelude::*;
-/// use igris_btree::parser::JsonTreeParser;
+/// use darksand_btree::prelude::*;
+/// use darksand_btree::parser::JsonTreeParser;
 /// use serde_json::json;
 ///
 /// # fn main() -> anyhow::Result<()> {
@@ -104,8 +104,8 @@ use tracing::debug;
 /// ## Parse a Sequence with Children
 ///
 /// ```
-/// use igris_btree::prelude::*;
-/// use igris_btree::parser::JsonTreeParser;
+/// use darksand_btree::prelude::*;
+/// use darksand_btree::parser::JsonTreeParser;
 /// use serde_json::json;
 ///
 /// # fn main() -> anyhow::Result<()> {
@@ -145,7 +145,7 @@ impl JsonTreeParser {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::parser::JsonTreeParser;
+    /// use darksand_btree::parser::JsonTreeParser;
     ///
     /// let parser = JsonTreeParser::new();
     /// ```
@@ -178,8 +178,8 @@ impl JsonTreeParser {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
-    /// use igris_btree::parser::JsonTreeParser;
+    /// use darksand_btree::prelude::*;
+    /// use darksand_btree::parser::JsonTreeParser;
     /// use serde_json::json;
     ///
     /// # fn main() -> anyhow::Result<()> {
@@ -330,7 +330,7 @@ impl Default for JsonTreeParser {
 /// # Example
 ///
 /// ```
-/// use igris_btree::parser::LlmTreeParser;
+/// use darksand_btree::parser::LlmTreeParser;
 ///
 /// let parser = LlmTreeParser::new();
 /// // Equivalent to JsonTreeParser::new()

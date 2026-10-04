@@ -7,7 +7,7 @@
 //! # Node Types
 //!
 //! - [`SetBlackboard`]: Write values to the blackboard
-//! - [`ToolAction`]: Execute igris-tools actions
+//! - [`ToolAction`]: Execute darksand-tools actions
 //!
 //! # Characteristics
 //!
@@ -22,7 +22,7 @@
 //! ## State Management
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //! use serde_json::json;
 //!
 //! # #[tokio::main]
@@ -43,8 +43,8 @@
 //! ## Tool Execution
 //!
 //! ```no_run
-//! use igris_btree::prelude::*;
-//! use igris_tools::ToolRegistry;
+//! use darksand_btree::prelude::*;
+//! use darksand_tools::ToolRegistry;
 //! use serde_json::json;
 //!
 //! # #[tokio::main]

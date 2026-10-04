@@ -236,7 +236,7 @@ mod tests {
             &key,
         );
         let path = std::env::temp_dir()
-            .join("igris_violation_test_v2.jsonl")
+            .join("darksand_violation_test_v2.jsonl")
             .to_string_lossy()
             .into_owned();
         let _ = std::fs::remove_file(&path);

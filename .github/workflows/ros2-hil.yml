@@ -39,7 +39,7 @@ jobs:
       ENABLE_ROS2: "true"
       ROS_DOMAIN_ID: ${{ inputs.ros_domain_id }}
       RUST_BACKTRACE: "1"
-      ROS2_VIOLATION_LOG: /tmp/igris-ros2-hil-violations.jsonl
+      ROS2_VIOLATION_LOG: /tmp/darksand-ros2-hil-violations.jsonl
 
     steps:
       - name: Checkout
@@ -63,9 +63,9 @@ jobs:
           set -euo pipefail
           source "/opt/ros/${{ inputs.ros_distro }}/setup.bash"
           cargo test \
-            --manifest-path igris-runtime/Cargo.toml \
-            -p igris-server \
-            --features ros2 \
+            --manifest-path Cargo.toml \
+            -p darksand-ros2 -p darksand-btree \
+            --features darksand-btree/ros2 \
             '${{ inputs.test_filter }}' \
             -- --nocapture
 
@@ -75,7 +75,7 @@ jobs:
         with:
           name: ros2-hil-audit-artifacts
           path: |
-            /tmp/igris-ros2-hil-violations.jsonl
-            /tmp/igris_ros2_violations.jsonl
-            /tmp/igris-ros2-*.jsonl
+            /tmp/darksand-ros2-hil-violations.jsonl
+            /tmp/darksand_ros2_violations.jsonl
+            /tmp/darksand-ros2-*.jsonl
           if-no-files-found: ignore

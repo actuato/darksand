@@ -16,8 +16,8 @@ use tracing::{error, warn};
 /// # Example
 ///
 /// ```no_run
-/// use igris_btree::prelude::*;
-/// use igris_btree::safety::Watchdog;
+/// use darksand_btree::prelude::*;
+/// use darksand_btree::safety::Watchdog;
 /// use std::time::Duration;
 ///
 /// let child = SetBlackboard::new("action", "key", "value");

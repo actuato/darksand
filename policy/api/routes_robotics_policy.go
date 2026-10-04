@@ -16,7 +16,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/rs/zerolog/log"
 
-	"github.com/Igris-inertial/system/igris-overture/middleware"
+	"github.com/darksand/darksand/middleware"
 )
 
 type roboticsPolicyRequest struct {
@@ -63,11 +63,11 @@ type roboticsPolicyActor struct {
 }
 
 const (
-	roboticsPolicySignerHeader        = "X-Igris-Policy-Signer"
-	roboticsPolicyKeyVersionHeader    = "X-Igris-Policy-Key-Version"
-	roboticsPolicySignatureHeader     = "X-Igris-Policy-Signature"
-	roboticsPolicySignedAtHeader      = "X-Igris-Policy-Signed-At"
-	roboticsPolicyNonceHeader         = "X-Igris-Policy-Nonce"
+	roboticsPolicySignerHeader        = "X-Darksand-Policy-Signer"
+	roboticsPolicyKeyVersionHeader    = "X-Darksand-Policy-Key-Version"
+	roboticsPolicySignatureHeader     = "X-Darksand-Policy-Signature"
+	roboticsPolicySignedAtHeader      = "X-Darksand-Policy-Signed-At"
+	roboticsPolicyNonceHeader         = "X-Darksand-Policy-Nonce"
 	roboticsPolicyCommandMaxClockSkew = 5 * time.Minute
 )
 

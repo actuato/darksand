@@ -1,4 +1,4 @@
-//! ROS2 Integration for Igris Runtime
+//! ROS2 Integration for Darksand Runtime
 //!
 //! Provides ROS2 node implementation for publishing/subscribing to prompts and responses.
 //! Integrates with nav2 for autonomous navigation planning.
@@ -23,8 +23,8 @@
 //! async fn main() -> anyhow::Result<()> {
 //!     let config = Ros2Config {
 //!         enabled: true,
-//!         node_name: "igris_agent".to_string(),
-//!         namespace: "/igris".to_string(),
+//!         node_name: "darksand_agent".to_string(),
+//!         namespace: "/darksand".to_string(),
 //!         ..Default::default()
 //!     };
 //!
@@ -88,8 +88,8 @@ impl Default for Ros2Config {
     fn default() -> Self {
         Self {
             enabled: false,
-            node_name: "igris_agent".to_string(),
-            namespace: "/igris".to_string(),
+            node_name: "darksand_agent".to_string(),
+            namespace: "/darksand".to_string(),
             domain_id: 0,
             enable_nav2: false,
             nav2_action_server: "/navigate_to_pose".to_string(),

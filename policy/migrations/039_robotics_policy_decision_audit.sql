@@ -1,7 +1,7 @@
 -- Migration 039: Persist signed robotics policy decisions for audit replay.
 --
 -- Receipt audit rows reference policy_decision_id. This table stores the full
--- signed control-plane decision so Overture can later reconstruct who allowed
+-- signed control-plane decision so Darksand can later reconstruct who allowed
 -- which robot action under which policy and compare it with Runtime receipts.
 
 CREATE TABLE IF NOT EXISTS robotics_policy_decision_audit (

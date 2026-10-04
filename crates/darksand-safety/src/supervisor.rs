@@ -98,7 +98,7 @@ impl Supervisor {
             .config
             .worker_bin
             .clone()
-            .or_else(|| std::env::var("IGRIS_WORKER_BIN").ok());
+            .or_else(|| std::env::var("DARKSAND_WORKER_BIN").ok());
         let exe = match worker_bin {
             Some(path) => std::path::PathBuf::from(path),
             None => std::env::current_exe().map_err(|e| e.to_string())?,
@@ -169,7 +169,7 @@ impl Supervisor {
         let hier = hierarchies::auto();
         let period: u64 = 100_000; // 100 ms in µs
         let quota = (self.config.bounds.max_cpu_percent as i64 * period as i64) / 100;
-        let cg = CgroupBuilder::new("igris_worker")
+        let cg = CgroupBuilder::new("darksand_worker")
             .cpu()
             .quota(quota)
             .period(period)
@@ -321,7 +321,7 @@ mod tests {
         let bus = ViolationEventBus::new();
         let mut rx = bus.subscribe();
         let log = std::env::temp_dir()
-            .join("igris_sup_emit_test.jsonl")
+            .join("darksand_sup_emit_test.jsonl")
             .to_string_lossy()
             .into_owned();
         let _ = std::fs::remove_file(&log);
@@ -347,7 +347,7 @@ mod tests {
         let bounds = Bounds::new(80, 500);
         let secret: [u8; 32] = rand::random();
         let signing_key = SigningKey::from_bytes(&secret);
-        let mut sup = Supervisor::new(bounds, signing_key, "/tmp/igris_sup_test.jsonl".to_string());
+        let mut sup = Supervisor::new(bounds, signing_key, "/tmp/darksand_sup_test.jsonl".to_string());
         let result = sup.execute(serde_json::json!({"ping": 1})).await;
         assert!(
             result.is_ok(),
@@ -363,7 +363,7 @@ mod tests {
         let bounds = Bounds::new(80, 50); // 50 ms — worker must exceed this
         let secret: [u8; 32] = rand::random();
         let signing_key = SigningKey::from_bytes(&secret);
-        let log = "/tmp/igris_sup_timeout_test.jsonl".to_string();
+        let log = "/tmp/darksand_sup_timeout_test.jsonl".to_string();
         let _ = std::fs::remove_file(&log);
         let mut sup = Supervisor::new(bounds, signing_key, log.clone());
         let result = sup.execute(serde_json::json!({"slow": true})).await;

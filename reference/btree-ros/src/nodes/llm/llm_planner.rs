@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 /// Workflow:
 /// 1. Get task description from blackboard
 /// 2. Construct prompt with task + available tools + BTree schema
-/// 3. Call LLM (with bounded timeout via igris-rt if available)
+/// 3. Call LLM (with bounded timeout via darksand-rt if available)
 /// 4. Parse JSON response into BTree plan
 /// 5. Store plan in blackboard for SubtreeLoader
 ///
@@ -93,7 +93,7 @@ Respond ONLY with valid JSON."#,
 
         // Execute with bounded timeout if RT executor available
         let plan_text = if let Some(rt_executor) = &context.rt_executor {
-            use igris_rt::Priority;
+            use darksand_rt::Priority;
 
             let provider_clone = provider.clone();
             let prompt_clone = prompt.clone();

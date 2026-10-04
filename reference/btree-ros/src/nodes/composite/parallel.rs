@@ -13,7 +13,7 @@ use tracing::debug;
 /// # Examples
 ///
 /// ```
-/// use igris_btree::nodes::composite::ParallelPolicy;
+/// use darksand_btree::nodes::composite::ParallelPolicy;
 ///
 /// let policy = ParallelPolicy::RequireAll;
 /// let policy2 = ParallelPolicy::RequireOne;
@@ -79,8 +79,8 @@ pub enum ParallelPolicy {
 /// ## Require All
 ///
 /// ```
-/// use igris_btree::prelude::*;
-/// use igris_btree::nodes::composite::ParallelPolicy;
+/// use darksand_btree::prelude::*;
+/// use darksand_btree::nodes::composite::ParallelPolicy;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
@@ -100,8 +100,8 @@ pub enum ParallelPolicy {
 /// ## Require One
 ///
 /// ```
-/// use igris_btree::prelude::*;
-/// use igris_btree::nodes::composite::ParallelPolicy;
+/// use darksand_btree::prelude::*;
+/// use darksand_btree::nodes::composite::ParallelPolicy;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
@@ -136,8 +136,8 @@ impl Parallel {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
-    /// use igris_btree::nodes::composite::ParallelPolicy;
+    /// use darksand_btree::prelude::*;
+    /// use darksand_btree::nodes::composite::ParallelPolicy;
     ///
     /// let parallel = Parallel::new("concurrent_tasks", ParallelPolicy::RequireAll);
     /// assert_eq!(parallel.name(), "concurrent_tasks");
@@ -162,8 +162,8 @@ impl Parallel {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
-    /// use igris_btree::nodes::composite::ParallelPolicy;
+    /// use darksand_btree::prelude::*;
+    /// use darksand_btree::nodes::composite::ParallelPolicy;
     ///
     /// let parallel = Parallel::new("test", ParallelPolicy::RequireOne)
     ///     .add_child(Box::new(SetBlackboard::new("a", "k1", "v1")))

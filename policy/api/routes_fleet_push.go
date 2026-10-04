@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	"github.com/Igris-inertial/system/igris-overture/middleware"
+	"github.com/darksand/darksand/middleware"
 )
 
 // RegisterFleetPushRoutes registers fleet config-push and OTA update endpoints.

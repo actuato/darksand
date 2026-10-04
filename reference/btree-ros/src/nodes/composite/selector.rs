@@ -30,7 +30,7 @@ use tracing::debug;
 /// ## Basic Fallback
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
@@ -52,7 +52,7 @@ use tracing::debug;
 /// ## All Options Fail
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
@@ -85,7 +85,7 @@ impl Selector {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
+    /// use darksand_btree::prelude::*;
     ///
     /// let selector = Selector::new("fallback_strategy");
     /// assert_eq!(selector.name(), "fallback_strategy");
@@ -109,7 +109,7 @@ impl Selector {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
+    /// use darksand_btree::prelude::*;
     ///
     /// let selector = Selector::new("test")
     ///     .add_child(Box::new(CheckBlackboard::new("primary", "ready", true)))
@@ -131,7 +131,7 @@ impl Selector {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
+    /// use darksand_btree::prelude::*;
     ///
     /// let children: Vec<Box<dyn BTreeNode>> = vec![
     ///     Box::new(CheckBlackboard::new("opt1", "primary", true)),

@@ -1,14 +1,14 @@
-//! ToolAction node - executes tools from the igris-tools registry.
+//! ToolAction node - executes tools from the darksand-tools registry.
 
 use crate::core::{BTreeContext, BTreeNode, NodeStatus};
 use anyhow::Result;
 use async_trait::async_trait;
-use igris_tools::ToolRegistry;
+use darksand_tools::ToolRegistry;
 use serde_json::Value;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
-/// ToolAction: Execute an igris-tools tool.
+/// ToolAction: Execute an darksand-tools tool.
 ///
 /// This node executes tools registered in the `ToolRegistry`. Tools can be
 /// anything from navigation commands to sensor readings to manipulation actions.
@@ -23,12 +23,12 @@ use tracing::{debug, warn};
 ///
 /// # Tool Integration
 ///
-/// Tools are provided by the `igris-tools` crate and registered in a `ToolRegistry`.
+/// Tools are provided by the `darksand-tools` crate and registered in a `ToolRegistry`.
 /// The registry is passed to the context at initialization:
 ///
 /// ```no_run
-/// use igris_btree::prelude::*;
-/// use igris_tools::ToolRegistry;
+/// use darksand_btree::prelude::*;
+/// use darksand_tools::ToolRegistry;
 ///
 /// let mut registry = ToolRegistry::new();
 /// // Register tools here...
@@ -42,8 +42,8 @@ use tracing::{debug, warn};
 /// ## Basic Tool Execution
 ///
 /// ```no_run
-/// use igris_btree::prelude::*;
-/// use igris_tools::ToolRegistry;
+/// use darksand_btree::prelude::*;
+/// use darksand_tools::ToolRegistry;
 /// use serde_json::json;
 ///
 /// # #[tokio::main]
@@ -83,8 +83,8 @@ impl ToolAction {
     /// # Example
     ///
     /// ```no_run
-    /// use igris_btree::nodes::action::ToolAction;
-    /// use igris_tools::ToolRegistry;
+    /// use darksand_btree::nodes::action::ToolAction;
+    /// use darksand_tools::ToolRegistry;
     /// use serde_json::json;
     /// use std::sync::Arc;
     ///

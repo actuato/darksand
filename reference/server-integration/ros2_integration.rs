@@ -1,18 +1,18 @@
-//! ROS2 + Containment Bridge integration for igris-server.
+//! ROS2 + Containment Bridge integration for darksand-server.
 //!
 //! This module provides the startup wiring that connects:
 //!
-//! - [`igris_safety::ViolationEventBus`] — broadcast channel for violations
-//! - [`igris_ros2::Ros2Node`] — ROS2 node for Nav2 and /cmd_vel
-//! - [`igris_ros2::containment_bridge::ContainmentBridge`] — deterministic halt bridge
-//! - [`igris_ros2::containment_bridge::SafeIdleReceiver`] — BT safe-idle watch signal
+//! - [`darksand_safety::ViolationEventBus`] — broadcast channel for violations
+//! - [`darksand_ros2::Ros2Node`] — ROS2 node for Nav2 and /cmd_vel
+//! - [`darksand_ros2::containment_bridge::ContainmentBridge`] — deterministic halt bridge
+//! - [`darksand_ros2::containment_bridge::SafeIdleReceiver`] — BT safe-idle watch signal
 //!
 //! # Startup sequence
 //!
 //! ```rust,no_run
 //! # async fn example() -> anyhow::Result<()> {
-//! use igris_server::ros2_integration::Ros2Manager;
-//! use igris_safety::{Bounds, ViolationEventBus};
+//! use darksand_server::ros2_integration::Ros2Manager;
+//! use darksand_safety::{Bounds, ViolationEventBus};
 //! use ed25519_dalek::SigningKey;
 //!
 //! // 1. Create the violation event bus (shared with ContainmentGuard).
@@ -22,7 +22,7 @@
 //! // let guard = ContainmentGuard::new_with_bus(bounds, signing_key, log_path, bus.clone());
 //!
 //! // 3. Start the ROS2 manager (creates Ros2Node + ContainmentBridge).
-//! let ros2_config = igris_ros2::Ros2Config {
+//! let ros2_config = darksand_ros2::Ros2Config {
 //!     enabled: true,
 //!     enable_nav2: true,
 //!     ..Default::default()
@@ -41,10 +41,10 @@
 //! behavior tree executions:
 //!
 //! ```rust,no_run
-//! use igris_ros2::containment_bridge::is_safe_idle;
+//! use darksand_ros2::containment_bridge::is_safe_idle;
 //!
 //! # async fn btree_run_handler(
-//! #     idle_rx: &igris_ros2::containment_bridge::SafeIdleReceiver,
+//! #     idle_rx: &darksand_ros2::containment_bridge::SafeIdleReceiver,
 //! # ) -> Result<String, String> {
 //! if is_safe_idle(idle_rx) {
 //!     return Err("System in safe-idle after containment violation — no new BTree work".to_string());
@@ -55,11 +55,11 @@
 //! ```
 
 use ed25519_dalek::SigningKey;
-use igris_ros2::{
+use darksand_ros2::{
     containment_bridge::{ContainmentBridge, SafeIdleReceiver},
     Ros2Config, Ros2Node,
 };
-use igris_safety::ViolationEventBus;
+use darksand_safety::ViolationEventBus;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -136,7 +136,7 @@ impl Ros2Manager {
 
     /// Returns true if the system is currently in safe-idle mode.
     pub fn is_safe_idle(&self) -> bool {
-        igris_ros2::containment_bridge::is_safe_idle(&self.idle_rx)
+        darksand_ros2::containment_bridge::is_safe_idle(&self.idle_rx)
     }
 
     /// Returns the configured ROS2 namespace used for prompt/response topics.
@@ -156,8 +156,8 @@ impl Ros2Manager {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use igris_ros2::containment_bridge::is_safe_idle;
-    use igris_safety::{ViolationEventBus, ViolationKind, ViolationRecord};
+    use darksand_ros2::containment_bridge::is_safe_idle;
+    use darksand_safety::{ViolationEventBus, ViolationKind, ViolationRecord};
     use uuid::Uuid;
 
     fn test_key() -> SigningKey {
@@ -166,7 +166,7 @@ mod tests {
 
     fn test_log() -> String {
         std::env::temp_dir()
-            .join(format!("igris_ros2_mgr_test_{}.jsonl", Uuid::now_v7()))
+            .join(format!("darksand_ros2_mgr_test_{}.jsonl", Uuid::now_v7()))
             .to_string_lossy()
             .into_owned()
     }

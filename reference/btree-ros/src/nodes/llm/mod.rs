@@ -70,8 +70,8 @@
 //! ## Basic LLM Planning
 //!
 //! ```no_run
-//! use igris_btree::prelude::*;
-//! use igris_btree::MockLlmProvider;
+//! use darksand_btree::prelude::*;
+//! use darksand_btree::MockLlmProvider;
 //!
 //! # #[tokio::main]
 //! # async fn main() -> anyhow::Result<()> {
@@ -94,8 +94,8 @@
 //! ## Load and Execute Plan
 //!
 //! ```no_run
-//! use igris_btree::prelude::*;
-//! use igris_btree::MockLlmProvider;
+//! use darksand_btree::prelude::*;
+//! use darksand_btree::MockLlmProvider;
 //!
 //! # #[tokio::main]
 //! # async fn main() -> anyhow::Result<()> {
@@ -116,8 +116,8 @@
 //! ## Full Hybrid Tree
 //!
 //! ```no_run
-//! use igris_btree::prelude::*;
-//! use igris_btree::MockLlmProvider;
+//! use darksand_btree::prelude::*;
+//! use darksand_btree::MockLlmProvider;
 //!
 //! # #[tokio::main]
 //! # async fn main() -> anyhow::Result<()> {

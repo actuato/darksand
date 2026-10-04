@@ -1,9 +1,9 @@
-//! # Igris Behavior Tree (Hybrid BTree + LLM)
+//! # Darksand Behavior Tree (Hybrid BTree + LLM)
 //!
 //! A production-grade behavior tree engine combining:
 //! - **Deterministic control flow** (Sequence, Selector, Parallel nodes)
 //! - **LLM-powered adaptive reasoning** (LLMPlanner, ReplanOnFailure)
-//! - **Bounded execution** (integration with igris-rt for real-time guarantees)
+//! - **Bounded execution** (integration with darksand-rt for real-time guarantees)
 //! - **BYOM philosophy** (pluggable LlmProvider trait, no vendor lock-in)
 //!
 //! ## Architecture
@@ -36,7 +36,7 @@
 //! ## Example: Hybrid Mission Tree
 //!
 //! ```rust,no_run
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {

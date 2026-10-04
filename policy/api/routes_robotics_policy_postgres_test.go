@@ -17,12 +17,12 @@ import (
 )
 
 func TestRoboticsPolicyActivationWithPostgresMigrations(t *testing.T) {
-	dsn := os.Getenv("IGRIS_OVERTURE_POSTGRES_TEST_DSN")
+	dsn := os.Getenv("DARKSAND_POSTGRES_TEST_DSN")
 	if dsn == "" {
 		dsn = os.Getenv("POSTGRES_TEST_DSN")
 	}
 	if dsn == "" {
-		t.Skip("set IGRIS_OVERTURE_POSTGRES_TEST_DSN or POSTGRES_TEST_DSN to run real Postgres migration test")
+		t.Skip("set DARKSAND_POSTGRES_TEST_DSN or POSTGRES_TEST_DSN to run real Postgres migration test")
 	}
 
 	db, err := sql.Open("postgres", dsn)

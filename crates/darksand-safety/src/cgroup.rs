@@ -8,7 +8,7 @@ pub struct CGroup {
 }
 
 impl CGroup {
-    /// Create a new cgroup scoped to `igris_containment` with the given CPU bounds.
+    /// Create a new cgroup scoped to `darksand_containment` with the given CPU bounds.
     pub fn new(bounds: &Bounds) -> Result<Self, String> {
         #[cfg(target_os = "linux")]
         {
@@ -18,7 +18,7 @@ impl CGroup {
             let period: u64 = 100_000; // 100 ms in µs
             let quota = (bounds.max_cpu_percent as i64 * period as i64) / 100;
 
-            let cg = CgroupBuilder::new("igris_containment")
+            let cg = CgroupBuilder::new("darksand_containment")
                 .cpu()
                 .quota(quota)
                 .period(period)

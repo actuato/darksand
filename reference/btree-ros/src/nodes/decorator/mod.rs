@@ -64,7 +64,7 @@
 //! ## Robust Network Request
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //!
 //! let robust_request = Retry::new(
 //!     "retry_request",
@@ -76,7 +76,7 @@
 //! ## Time-Bounded Search
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //! use std::time::Duration;
 //!
 //! let bounded_search = Timeout::new(
@@ -89,7 +89,7 @@
 //! ## Inverted Condition
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //! use serde_json::json;
 //!
 //! // "While NOT ready, wait"
@@ -106,8 +106,8 @@
 //! ## Self-Healing Behavior
 //!
 //! ```no_run
-//! use igris_btree::prelude::*;
-//! use igris_btree::MockLlmProvider;
+//! use darksand_btree::prelude::*;
+//! use darksand_btree::MockLlmProvider;
 //!
 //! # #[tokio::main]
 //! # async fn main() -> anyhow::Result<()> {

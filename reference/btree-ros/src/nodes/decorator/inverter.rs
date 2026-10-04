@@ -30,7 +30,7 @@ use serde_json::Value;
 /// ## Basic Inversion
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
@@ -49,7 +49,7 @@ use serde_json::Value;
 /// ## Negating a Condition
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 /// use serde_json::json;
 ///
 /// # #[tokio::main]
@@ -87,7 +87,7 @@ impl Inverter {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
+    /// use darksand_btree::prelude::*;
     ///
     /// let child = Box::new(CheckBlackboard::new("check", "flag", true));
     /// let inverter = Inverter::new("not_flag", child);

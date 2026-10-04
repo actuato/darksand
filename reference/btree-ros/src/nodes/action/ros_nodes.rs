@@ -46,7 +46,7 @@ const MAX_PAYLOAD_BYTES: usize = 65_536;
 /// # Example
 ///
 /// ```no_run
-/// use igris_btree::nodes::action::RosTopicPublish;
+/// use darksand_btree::nodes::action::RosTopicPublish;
 /// use serde_json::json;
 ///
 /// let node = RosTopicPublish::new(
@@ -190,7 +190,7 @@ impl crate::core::BTreeNode for RosTopicPublish {
 /// # Example
 ///
 /// ```no_run
-/// use igris_btree::nodes::action::RosTopicSubscribe;
+/// use darksand_btree::nodes::action::RosTopicSubscribe;
 ///
 /// let node = RosTopicSubscribe::new(
 ///     "wait_for_pose",
@@ -298,7 +298,7 @@ impl crate::core::BTreeNode for RosTopicSubscribe {
 /// # Example
 ///
 /// ```no_run
-/// use igris_btree::nodes::action::RosServiceCall;
+/// use darksand_btree::nodes::action::RosServiceCall;
 /// use serde_json::json;
 ///
 /// let node = RosServiceCall::new(
@@ -420,7 +420,7 @@ impl crate::core::BTreeNode for RosServiceCall {
 mod tests {
     use super::*;
     use crate::core::{BTreeContext, BTreeNode};
-    use igris_ros2::{Ros2Config, Ros2Node};
+    use darksand_ros2::{Ros2Config, Ros2Node};
     use std::sync::Arc;
 
     async fn make_context() -> BTreeContext {

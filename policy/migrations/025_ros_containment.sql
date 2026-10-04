@@ -19,7 +19,7 @@ CREATE INDEX IF NOT EXISTS idx_ros_topic_activity_device
 CREATE TABLE IF NOT EXISTS ros_lifecycle_states (
     id              BIGSERIAL    PRIMARY KEY,
     runtime_id      TEXT         NOT NULL UNIQUE,
-    node_name       TEXT         NOT NULL DEFAULT 'igris_node',
+    node_name       TEXT         NOT NULL DEFAULT 'darksand_node',
     namespace       TEXT         NOT NULL DEFAULT '/',
     lifecycle_state TEXT         NOT NULL DEFAULT 'Unconfigured',
     air_gapped      BOOLEAN      NOT NULL DEFAULT false,

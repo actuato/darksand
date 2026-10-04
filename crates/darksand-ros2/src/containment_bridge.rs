@@ -359,7 +359,7 @@ mod tests {
 
     fn test_log() -> String {
         std::env::temp_dir()
-            .join(format!("igris_bridge_test_{}.jsonl", uuid::Uuid::now_v7()))
+            .join(format!("darksand_bridge_test_{}.jsonl", uuid::Uuid::now_v7()))
             .to_string_lossy()
             .into_owned()
     }

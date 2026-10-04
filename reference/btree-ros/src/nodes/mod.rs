@@ -25,7 +25,7 @@
 //!
 //! Execute concrete behaviors:
 //! - [`SetBlackboard`](action::SetBlackboard): Write to blackboard
-//! - [`ToolAction`](action::ToolAction): Execute igris-tools
+//! - [`ToolAction`](action::ToolAction): Execute darksand-tools
 //!
 //! ## Condition Nodes
 //!
@@ -43,7 +43,7 @@
 //! ## Building a Tree
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //!
 //! # #[tokio::main]
 //! # async fn main() -> anyhow::Result<()> {

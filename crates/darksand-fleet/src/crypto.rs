@@ -1,7 +1,7 @@
 //! Cryptographic operations for fleet hybrid contract
 //!
-//! Implements Ed25519 signing for Runtime registration and heartbeats to establish
-//! a cryptographic trust model with Overture.
+//! Implements Ed25519 signing for agent registration and heartbeats to establish
+//! a cryptographic trust model with Darksand.
 
 use anyhow::{Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -188,7 +188,7 @@ impl ExecutionEnvelope {
     }
 }
 
-/// Signed decision from Overture
+/// Signed decision from Darksand
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedDecision {
     /// The actual routing decision
@@ -205,7 +205,7 @@ pub struct SignedDecision {
     pub key_version: i32,
 }
 
-/// Signed decision envelope from Overture
+/// Signed decision envelope from Darksand
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedDecisionEnvelope {
     pub decision: SignedDecision,
@@ -213,7 +213,7 @@ pub struct SignedDecisionEnvelope {
 }
 
 impl SignedDecisionEnvelope {
-    /// Verify the decision signature using Overture's public key
+    /// Verify the decision signature using Darksand's public key
     pub fn verify(&self, public_key_base64: &str) -> Result<()> {
         use base64::Engine;
         use ed25519_dalek::{Signature, VerifyingKey};
@@ -249,7 +249,7 @@ impl SignedDecisionEnvelope {
 
         let signature = Signature::from_slice(&sig_bytes).context("Invalid signature format")?;
 
-        // Serialize decision for verification (must match Overture's serialization)
+        // Serialize decision for verification (must match Darksand's serialization)
         let decision_json =
             serde_json::to_vec(&self.decision).context("Failed to serialize decision")?;
 

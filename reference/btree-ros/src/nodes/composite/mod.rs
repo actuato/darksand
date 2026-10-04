@@ -48,7 +48,7 @@
 //! ## Multi-Step Procedure (Sequence)
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //!
 //! let procedure = Sequence::new("startup")
 //!     .add_child(Box::new(SetBlackboard::new("step1", "systems", "initializing")))
@@ -59,7 +59,7 @@
 //! ## Fallback Strategy (Selector)
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //!
 //! let fallback = Selector::new("communication")
 //!     .add_child(Box::new(CheckBlackboard::new("wifi", "wifi_available", true)))
@@ -70,8 +70,8 @@
 //! ## Concurrent Monitoring (Parallel)
 //!
 //! ```
-//! use igris_btree::prelude::*;
-//! use igris_btree::nodes::composite::ParallelPolicy;
+//! use darksand_btree::prelude::*;
+//! use darksand_btree::nodes::composite::ParallelPolicy;
 //!
 //! let monitoring = Parallel::new("monitors", ParallelPolicy::RequireAll)
 //!     .add_child(Box::new(CheckBlackboard::new("battery", "battery_ok", true)))

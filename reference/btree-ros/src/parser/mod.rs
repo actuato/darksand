@@ -37,8 +37,8 @@
 //! ## Parse a Navigation Plan
 //!
 //! ```
-//! use igris_btree::prelude::*;
-//! use igris_btree::parser::JsonTreeParser;
+//! use darksand_btree::prelude::*;
+//! use darksand_btree::parser::JsonTreeParser;
 //! use serde_json::json;
 //!
 //! # fn main() -> anyhow::Result<()> {
@@ -80,13 +80,13 @@
 //! ## Integration with LLM
 //!
 //! ```no_run
-//! use igris_btree::prelude::*;
-//! use igris_btree::parser::JsonTreeParser;
+//! use darksand_btree::prelude::*;
+//! use darksand_btree::parser::JsonTreeParser;
 //! use serde_json::json;
 //!
 //! # #[tokio::main]
 //! # async fn main() -> anyhow::Result<()> {
-//! # use igris_btree::MockLlmProvider;
+//! # use darksand_btree::MockLlmProvider;
 //! # use std::sync::Arc;
 //! // 1. LLM generates plan
 //! let provider = Arc::new(MockLlmProvider::with_navigation_plan());

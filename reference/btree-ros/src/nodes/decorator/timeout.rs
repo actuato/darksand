@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 /// ## Basic Timeout
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 /// use std::time::Duration;
 ///
 /// # #[tokio::main]
@@ -54,7 +54,7 @@ use std::time::{Duration, Instant};
 /// ## Timeout with Slow Operation
 ///
 /// ```no_run
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 /// use std::time::Duration;
 ///
 /// # #[tokio::main]
@@ -106,7 +106,7 @@ impl Timeout {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
+    /// use darksand_btree::prelude::*;
     ///
     /// let child = Box::new(SetBlackboard::new("action", "key", "value"));
     /// let timeout = Timeout::new("bounded_action", child, 5000);

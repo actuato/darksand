@@ -27,7 +27,7 @@ use serde_json::Value;
 /// ## Basic Condition Check
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 /// use serde_json::json;
 ///
 /// # #[tokio::main]
@@ -55,7 +55,7 @@ use serde_json::Value;
 /// ## Using in a Sequence
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 /// use serde_json::json;
 ///
 /// # #[tokio::main]
@@ -97,7 +97,7 @@ impl CheckBlackboard {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::nodes::condition::CheckBlackboard;
+    /// use darksand_btree::nodes::condition::CheckBlackboard;
     /// use serde_json::json;
     ///
     /// let node = CheckBlackboard::new("check_ready", "status", json!("ready"));

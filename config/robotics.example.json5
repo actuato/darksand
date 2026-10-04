@@ -1,12 +1,12 @@
-// Robotics configuration excerpt for Darksand.
-// Extracted verbatim from igris igris-runtime/config.json5 (commit 7e6098ef9).
+// Robotics configuration for Darksand.
+// Derived from upstream config.json5 (commit 7e6098ef9), rebranded.
 // All sections default to disabled; enable per deployment.
 {
   // ROS2 Integration
   ros2: {
     enabled: false,  // Enable ROS2 integration
-    node_name: "igris_agent",  // ROS2 node name
-    namespace: "/igris",  // ROS2 namespace
+    node_name: "darksand_agent",  // ROS2 node name
+    namespace: "/darksand",  // ROS2 namespace
     domain_id: 0,  // ROS2 DDS domain ID
     enable_nav2: false,  // Enable Nav2 integration
     nav2_action_server: "/navigate_to_pose",  // Nav2 action server
@@ -42,7 +42,7 @@
   // Fleet Management
   fleet: {
     enabled: false,  // Enable fleet management
-    overture_endpoint: "https://overture.igris.dev",  // Overture endpoint URL
+    darksand_endpoint: "https://darksand.example.com",  // Darksand endpoint URL
     agent_id: null,  // Agent ID (auto-generated if null)
     api_key_env: "FLEET_API_KEY",  // Fleet API key environment variable
     enable_tls: true,  // Enable TLS for secure communication

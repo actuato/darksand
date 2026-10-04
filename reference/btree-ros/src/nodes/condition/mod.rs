@@ -53,7 +53,7 @@
 //! ## Guard Before Action
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //! use serde_json::json;
 //!
 //! # #[tokio::main]
@@ -74,7 +74,7 @@
 //! ## Conditional Branch
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //! use serde_json::json;
 //!
 //! # #[tokio::main]

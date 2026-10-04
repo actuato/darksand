@@ -34,15 +34,15 @@ pub async fn fetch_prometheus_metrics(endpoint: &str) -> Result<HashMap<String, 
 
             if let Ok(value) = value_str.trim().parse::<f64>() {
                 match metric_name {
-                    "igris_http_requests_total" => {
+                    "darksand_http_requests_total" => {
                         let current = metrics_map.get("requests_total").unwrap_or(&0.0);
                         metrics_map.insert("requests_total".to_string(), current + value);
                     }
-                    "igris_chat_requests_total" => {
+                    "darksand_chat_requests_total" => {
                         let current = metrics_map.get("requests_total").unwrap_or(&0.0);
                         metrics_map.insert("requests_total".to_string(), current + value);
                     }
-                    "igris_chat_stream_requests_total" => {
+                    "darksand_chat_stream_requests_total" => {
                         let current = metrics_map.get("requests_total").unwrap_or(&0.0);
                         metrics_map.insert("requests_total".to_string(), current + value);
                     }
@@ -59,10 +59,10 @@ pub async fn fetch_prometheus_metrics(endpoint: &str) -> Result<HashMap<String, 
     if let Some(total_requests) = metrics_map.get("requests_total") {
         if *total_requests > 0.0 {
             let errors = metrics_map
-                .get("igris_http_unauthorized_total")
+                .get("darksand_http_unauthorized_total")
                 .unwrap_or(&0.0)
                 + metrics_map
-                    .get("igris_http_rate_limited_total")
+                    .get("darksand_http_rate_limited_total")
                     .unwrap_or(&0.0);
 
             let error_rate = errors / total_requests;

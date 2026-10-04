@@ -25,7 +25,7 @@ use serde_json::Value;
 /// ## Basic Usage
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 /// use serde_json::json;
 ///
 /// # #[tokio::main]
@@ -44,7 +44,7 @@ use serde_json::Value;
 /// ## Setting Complex Values
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 /// use serde_json::json;
 ///
 /// # #[tokio::main]
@@ -82,7 +82,7 @@ impl SetBlackboard {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::nodes::action::SetBlackboard;
+    /// use darksand_btree::nodes::action::SetBlackboard;
     /// use serde_json::json;
     ///
     /// let node = SetBlackboard::new("init", "phase", "starting");

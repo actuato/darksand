@@ -1,6 +1,6 @@
 //! Darksand robotics policy service.
 //!
-//! Standalone replacement for the Overture robotics-policy endpoints:
+//! Standalone robotics-policy endpoints:
 //! versioned robot-mode policies with Ed25519-signed lifecycle commands,
 //! nonce replay protection, and an audit trail — backed by SQLite instead
 //! of Postgres + Clerk.
@@ -9,7 +9,7 @@
 //! of band (`DARKSAND_POLICY_KEYS="tenant:key,..."`). Every key-holder is
 //! an admin. Mutating lifecycle calls additionally require the
 //! `X-Policy-*` signed-command headers verified against the tenant's
-//! active signing key, using the same canonical scheme as Overture:
+//! active signing key, using the canonical scheme:
 //! `METHOD\nPATH\nKEY_VERSION\nSIGNED_AT_MS\nNONCE\nACTION\nhex(sha256(body))`.
 
 use anyhow::{Context, Result};

@@ -1,4 +1,4 @@
-//! Simulation & Testing Suite for Igris Runtime
+//! Simulation & Testing Suite for Darksand Runtime
 //!
 //! Provides virtual environments and chaos testing for AI agents.
 

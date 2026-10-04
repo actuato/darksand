@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Igris-inertial/system/igris-overture/internal"
-	"github.com/Igris-inertial/system/igris-overture/middleware"
-	"github.com/Igris-inertial/system/igris-overture/security"
+	"github.com/darksand/darksand/internal"
+	"github.com/darksand/darksand/middleware"
+	"github.com/darksand/darksand/security"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
@@ -694,7 +694,7 @@ func RegisterDeviceRoutes(app *fiber.App, db *sql.DB) {
 			var lastTrace sql.NullString
 			err := db.QueryRowContext(c.Context(), `
 				SELECT
-					COALESCE(node_name, 'igris_node') AS node_name,
+					COALESCE(node_name, 'darksand_node') AS node_name,
 					COALESCE(namespace, '/') AS namespace,
 					COALESCE(lifecycle_state, 'Unconfigured') AS lifecycle_state,
 					COALESCE(air_gapped, false) AS air_gapped,

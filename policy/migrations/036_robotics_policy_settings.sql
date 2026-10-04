@@ -1,6 +1,6 @@
 -- Migration 036: DB-backed robotics policy decisions for governed ROS2 actions.
 --
--- Overture evaluates this active tenant policy before signing a
+-- Darksand evaluates this active tenant policy before signing a
 -- governed_policy_decision.v1 payload for Runtime robotics dispatch.
 
 CREATE TABLE IF NOT EXISTS robotics_policy_settings (

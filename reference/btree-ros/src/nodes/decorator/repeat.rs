@@ -41,7 +41,7 @@ use serde_json::Value;
 /// ## Fixed Repeats
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
@@ -65,7 +65,7 @@ use serde_json::Value;
 /// ## Infinite Repeat
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
@@ -101,7 +101,7 @@ impl Repeat {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
+    /// use darksand_btree::prelude::*;
     ///
     /// let child = Box::new(SetBlackboard::new("action", "key", "value"));
     ///
@@ -132,7 +132,7 @@ impl Repeat {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
+    /// use darksand_btree::prelude::*;
     ///
     /// let child = Box::new(SetBlackboard::new("action", "key", "value"));
     /// let repeat = Repeat::infinite("loop", child);

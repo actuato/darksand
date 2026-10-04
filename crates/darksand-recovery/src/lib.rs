@@ -1,4 +1,4 @@
-//! Igris Error Recovery & Retry Logic
+//! Darksand Error Recovery & Retry Logic
 //!
 //! Provides intelligent error classification, retry strategies, backtracking,
 //! and robot-specific Nav2 recovery behaviors (spin, backup, clear costmap).
@@ -95,7 +95,7 @@ pub enum RecoveryOutcome {
 /// These are the standard Nav2 recovery actions — spin, backup, and costmap
 /// clear — that are invoked when navigation planning or execution fails.
 /// They mirror Nav2's built-in recovery behavior tree but can be triggered
-/// directly by Igris's durable task engine so that recovery attempts are
+/// directly by Darksand's durable task engine so that recovery attempts are
 /// WAL-logged and crash-recoverable themselves.
 ///
 /// Requires the `ros2` feature and a live ROS2 node.

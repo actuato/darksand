@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 #[cfg(feature = "wal")]
 use {
-    igris_wal::{BtCheckpointPayload, ResumeToken, StepType},
+    darksand_wal::{BtCheckpointPayload, ResumeToken, StepType},
     sha2::{Digest, Sha256},
 };
 
@@ -49,8 +49,8 @@ impl Default for ExecutorConfig {
 /// # Example
 ///
 /// ```no_run
-/// use igris_btree::prelude::*;
-/// use igris_btree::runtime::BTreeExecutor;
+/// use darksand_btree::prelude::*;
+/// use darksand_btree::runtime::BTreeExecutor;
 /// use std::time::Duration;
 ///
 /// #[tokio::main]
@@ -165,8 +165,8 @@ impl BTreeExecutor {
     /// # Example
     ///
     /// ```no_run
-    /// use igris_btree::prelude::*;
-    /// use igris_btree::runtime::BTreeExecutor;
+    /// use darksand_btree::prelude::*;
+    /// use darksand_btree::runtime::BTreeExecutor;
     /// use tokio::sync::watch;
     ///
     /// #[tokio::main]

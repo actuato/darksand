@@ -1,10 +1,10 @@
-//! Federated Fleet Control for Igris Runtime
+//! Federated Fleet Control for Darksand Runtime
 //!
 //! Provides centralized fleet management capabilities for coordinating
 //! multiple edge AI agents across distributed locations.
 //!
 //! # Features
-//! - **Fleet Registration:** Automatic registration with Overture control plane
+//! - **Fleet Registration:** Automatic registration with Darksand control plane
 //! - **Config Synchronization:** Push configuration updates to edge devices
 //! - **Telemetry Collection:** Aggregate logs and metrics from fleet
 //! - **Dashboard View:** Real-time fleet status monitoring
@@ -13,14 +13,14 @@
 //! # Architecture
 //! ```text
 //! ┌─────────────────┐
-//! │  Overture       │  (Cloud control plane)
+//! │  Darksand       │  (Cloud control plane)
 //! │  Fleet Manager  │
 //! └────────┬────────┘
 //!          │ TLS
 //!  ┌───────┴───────┐
 //!  │               │
 //! ┌▼──────┐    ┌──▼─────┐
-//! │ Edge 1│    │ Edge 2 │  (Igris Runtime instances)
+//! │ Edge 1│    │ Edge 2 │  (Darksand Runtime instances)
 //! └───────┘    └────────┘
 //! ```
 //!
@@ -31,7 +31,7 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let config = FleetConfig {
-//!         overture_endpoint: "https://overture.example.com".to_string(),
+//!         darksand_endpoint: "https://darksand.example.com".to_string(),
 //!         agent_id: "edge-1".to_string(),
 //!         ..Default::default()
 //!     };
@@ -63,8 +63,9 @@ pub struct FleetConfig {
     /// Enable fleet management
     pub enabled: bool,
 
-    /// Overture endpoint URL
-    pub overture_endpoint: String,
+    /// Darksand endpoint URL
+    #[serde(alias = "overture_endpoint")]
+    pub darksand_endpoint: String,
 
     /// Agent ID (unique identifier for this edge device)
     pub agent_id: String,
@@ -96,7 +97,7 @@ impl Default for FleetConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            overture_endpoint: "https://overture.igris.dev".to_string(),
+            darksand_endpoint: "https://darksand.example.com".to_string(),
             agent_id: Uuid::new_v4().to_string(),
             api_key: None,
             enable_tls: true,
@@ -200,7 +201,7 @@ impl FleetAgent {
 
         info!(
             "Initializing fleet agent {} for endpoint {}",
-            config.agent_id, config.overture_endpoint
+            config.agent_id, config.darksand_endpoint
         );
 
         // Build HTTP client with TLS
@@ -216,7 +217,7 @@ impl FleetAgent {
         };
 
         // Load or generate Ed25519 keypair for hybrid contract
-        let key_path = format!(".igris/fleet_{}_key", config.agent_id);
+        let key_path = format!(".darksand/fleet_{}_key", config.agent_id);
         let keypair = crypto::FleetKeypair::load_or_generate(&key_path)?;
         info!(
             "Fleet keypair loaded/generated. Public key: {}",
@@ -240,7 +241,7 @@ impl FleetAgent {
     pub async fn register(&self) -> Result<RegisterResponse> {
         info!(
             "Registering with fleet at {}",
-            self.config.overture_endpoint
+            self.config.darksand_endpoint
         );
 
         // Mock mode for testing
@@ -319,8 +320,8 @@ impl FleetAgent {
             signature,
         };
 
-        // Send POST request to Overture
-        let url = format!("{}/api/fleet/register", self.config.overture_endpoint);
+        // Send POST request to Darksand
+        let url = format!("{}/api/fleet/register", self.config.darksand_endpoint);
 
         let mut req = self.client.post(&url).json(&request);
 
@@ -332,7 +333,7 @@ impl FleetAgent {
         let response = req
             .send()
             .await
-            .context("Failed to send registration request to Overture")?
+            .context("Failed to send registration request to Darksand")?
             .error_for_status()
             .context("Registration request failed")?
             .json::<RegisterResponse>()
@@ -393,10 +394,10 @@ impl FleetAgent {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No fleet ID available"))?;
 
-        // Send GET request to Overture
+        // Send GET request to Darksand
         let url = format!(
             "{}/api/fleet/{}/config",
-            self.config.overture_endpoint, fleet_id
+            self.config.darksand_endpoint, fleet_id
         );
 
         let mut req = self.client.get(&url);
@@ -409,7 +410,7 @@ impl FleetAgent {
         let response = req
             .send()
             .await
-            .context("Failed to send config sync request to Overture")?
+            .context("Failed to send config sync request to Darksand")?
             .error_for_status()
             .context("Config sync request failed")?
             .json::<ConfigSyncResponse>()
@@ -460,10 +461,10 @@ impl FleetAgent {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No fleet ID available"))?;
 
-        // Send POST request to Overture with telemetry data
+        // Send POST request to Darksand with telemetry data
         let url = format!(
             "{}/api/fleet/{}/telemetry",
-            self.config.overture_endpoint, fleet_id
+            self.config.darksand_endpoint, fleet_id
         );
 
         let mut req = self.client.post(&url).json(&telemetry);
@@ -475,7 +476,7 @@ impl FleetAgent {
 
         req.send()
             .await
-            .context("Failed to send telemetry to Overture")?
+            .context("Failed to send telemetry to Darksand")?
             .error_for_status()
             .context("Telemetry upload failed")?;
 
@@ -514,10 +515,10 @@ impl FleetAgent {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No fleet ID available"))?;
 
-        // Send POST request to Overture with telemetry data
+        // Send POST request to Darksand with telemetry data
         let url = format!(
             "{}/api/fleet/{}/telemetry",
-            self.config.overture_endpoint, fleet_id
+            self.config.darksand_endpoint, fleet_id
         );
 
         let mut req = self.client.post(&url).json(&telemetry);
@@ -529,7 +530,7 @@ impl FleetAgent {
 
         req.send()
             .await
-            .context("Failed to send custom telemetry to Overture")?
+            .context("Failed to send custom telemetry to Darksand")?
             .error_for_status()
             .context("Custom telemetry upload failed")?;
 
@@ -651,7 +652,7 @@ impl FleetAgent {
         let config_version = self.config_version.clone();
         let fleet_id = self.fleet_id.clone();
         let client = self.client.clone();
-        let endpoint = self.config.overture_endpoint.clone();
+        let endpoint = self.config.darksand_endpoint.clone();
         let api_key = self.config.api_key.clone();
         let interval = Duration::from_secs(self.config.sync_interval_secs);
 
@@ -719,7 +720,7 @@ impl FleetAgent {
         let registered = self.registered.clone();
         let fleet_id = self.fleet_id.clone();
         let client = self.client.clone();
-        let endpoint = self.config.overture_endpoint.clone();
+        let endpoint = self.config.darksand_endpoint.clone();
         let api_key = self.config.api_key.clone();
         let agent_id = self.config.agent_id.clone();
         let start_time = self.start_time;
@@ -816,7 +817,7 @@ impl FleetAgent {
     pub async fn deregister(&self) -> Result<()> {
         info!("Deregistering from fleet");
 
-        // In production, send DELETE request to Overture
+        // In production, send DELETE request to Darksand
 
         let mut registered = self.registered.write().await;
         *registered = false;
@@ -834,7 +835,7 @@ pub mod telemetry;
 /// Cryptographic operations for hybrid contract (Ed25519 signing)
 pub mod crypto;
 
-/// Fleet Management Dashboard (for Overture integration)
+/// Fleet Management Dashboard (for Darksand integration)
 pub mod dashboard {
     use super::*;
 

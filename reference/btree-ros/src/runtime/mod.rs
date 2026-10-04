@@ -42,7 +42,7 @@
 //! ## Basic Execution
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //!
 //! # #[tokio::main]
 //! # async fn main() -> anyhow::Result<()> {
@@ -63,7 +63,7 @@
 //! ## With Bounds
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //! use std::time::Duration;
 //!
 //! # #[tokio::main]
@@ -91,7 +91,7 @@
 //! ## With Cancellation
 //!
 //! ```
-//! use igris_btree::prelude::*;
+//! use darksand_btree::prelude::*;
 //! use tokio::sync::watch;
 //! use std::time::Duration;
 //!

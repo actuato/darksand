@@ -86,7 +86,7 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&secret);
 
         let log_path = std::env::temp_dir()
-            .join("igris_guard_violation_test.jsonl")
+            .join("darksand_guard_violation_test.jsonl")
             .to_string_lossy()
             .into_owned();
         let _ = std::fs::remove_file(&log_path);
@@ -120,7 +120,7 @@ mod tests {
         let secret: [u8; 32] = [2u8; 32];
         let signing_key = SigningKey::from_bytes(&secret);
         let mut guard =
-            ContainmentGuard::new(bounds, signing_key, "/tmp/igris_guard_ok.jsonl".to_string());
+            ContainmentGuard::new(bounds, signing_key, "/tmp/darksand_guard_ok.jsonl".to_string());
         let result = guard.execute(serde_json::json!({"ping": 1})).await;
         assert!(result.is_ok(), "expected Ok from worker, got {:?}", result);
     }
@@ -132,7 +132,7 @@ mod tests {
         let bounds = Bounds::new(80, 50);
         let secret: [u8; 32] = [3u8; 32];
         let signing_key = SigningKey::from_bytes(&secret);
-        let log_path = "/tmp/igris_guard_timeout.jsonl".to_string();
+        let log_path = "/tmp/darksand_guard_timeout.jsonl".to_string();
         let _ = std::fs::remove_file(&log_path);
         let mut guard = ContainmentGuard::new(bounds, signing_key, log_path.clone());
         let result = guard.execute(serde_json::json!({"slow": true})).await;

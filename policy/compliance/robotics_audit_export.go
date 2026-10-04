@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Igris-inertial/system/igris-overture/coordinator"
+	"github.com/darksand/darksand/coordinator"
 )
 
 type PolicyKeyLifecycleAuditRecord struct {
@@ -282,7 +282,7 @@ func WriteRoboticsAuditBundleArtifacts(outputDir, format string, bundle Robotics
 
 func buildExportManifest(bundle RoboticsAuditExportBundle, bundleFilename, format, bundleSHA256 string, bundleBytes int64, signing ManifestSigningConfig) (ExportManifest, []byte, error) {
 	manifest := ExportManifest{
-		SchemaVersion:                "igris.robotics_compliance_manifest.v1",
+		SchemaVersion:                "darksand.robotics_compliance_manifest.v1",
 		TenantID:                     bundle.TenantID,
 		ExportedAt:                   bundle.ExportedAt.UTC(),
 		CreatedAt:                    time.Now().UTC(),

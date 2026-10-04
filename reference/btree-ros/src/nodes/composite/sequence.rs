@@ -30,7 +30,7 @@ use tracing::debug;
 /// ## Basic Sequence
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
@@ -50,7 +50,7 @@ use tracing::debug;
 /// ## Sequence with Failure
 ///
 /// ```
-/// use igris_btree::prelude::*;
+/// use darksand_btree::prelude::*;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> anyhow::Result<()> {
@@ -84,7 +84,7 @@ impl Sequence {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
+    /// use darksand_btree::prelude::*;
     ///
     /// let sequence = Sequence::new("my_sequence");
     /// assert_eq!(sequence.name(), "my_sequence");
@@ -108,7 +108,7 @@ impl Sequence {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
+    /// use darksand_btree::prelude::*;
     ///
     /// let sequence = Sequence::new("test")
     ///     .add_child(Box::new(SetBlackboard::new("a", "k1", "v1")))
@@ -130,7 +130,7 @@ impl Sequence {
     /// # Example
     ///
     /// ```
-    /// use igris_btree::prelude::*;
+    /// use darksand_btree::prelude::*;
     ///
     /// let children: Vec<Box<dyn BTreeNode>> = vec![
     ///     Box::new(SetBlackboard::new("a", "k1", "v1")),
