@@ -1,0 +1,25 @@
+[package]
+name = "darksand-btree"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Deterministic behavior-tree mission core with ROS2 action nodes"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = "0.1"
+darksand-ros2 = { path = "../darksand-ros2", optional = true }
+
+[features]
+default = []
+ros2 = ["dep:darksand-ros2"]
+# Live hardware: real r2r ROS2 bindings instead of the in-process stub.
+ros2-live = ["ros2", "darksand-ros2/ros2"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

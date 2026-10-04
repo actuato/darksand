@@ -1,12 +1,14 @@
 [workspace]
 members = [
-    "crates/igris-safety",
-    "crates/igris-ros2",
-    "crates/igris-recovery",
-    "crates/igris-fleet",
-    "crates/igris-swarm",
-    "crates/igris-sensors",
-    "crates/igris-simulation",
+    "crates/darksand-safety",
+    "crates/darksand-ros2",
+    "crates/darksand-recovery",
+    "crates/darksand-fleet",
+    "crates/darksand-swarm",
+    "crates/darksand-sensors",
+    "crates/darksand-simulation",
+    "crates/darksand-btree",
+    "crates/darksand-policy",
 ]
 resolver = "2"
 
@@ -47,6 +49,7 @@ hostname = "0.4"
 sysinfo = "0.30"
 image = "0.25"
 rppal = "0.14"
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [profile.release]
 opt-level = "z"
