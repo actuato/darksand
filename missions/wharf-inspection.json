@@ -1,0 +1,56 @@
+{
+  "version": "darksand-mission.v1",
+  "name": "wharf-inspection",
+  "root": {
+    "type": "Sequence",
+    "name": "mission",
+    "children": [
+      {
+        "type": "SetBlackboard",
+        "name": "init",
+        "key": "phase",
+        "value": "starting"
+      },
+      {
+        "type": "Retry",
+        "name": "ensure-ready",
+        "max_retries": 2,
+        "child": {
+          "type": "CheckBlackboard",
+          "name": "check-phase",
+          "key": "phase",
+          "expected": "starting"
+        }
+      },
+      {
+        "type": "Timeout",
+        "name": "bounded-leg",
+        "timeout_ms": 5000,
+        "child": {
+          "type": "SetBlackboard",
+          "name": "arrive",
+          "key": "phase",
+          "value": "on-station"
+        }
+      },
+      {
+        "type": "Selector",
+        "name": "confirm",
+        "children": [
+          {
+            "type": "CheckBlackboard",
+            "name": "already-done",
+            "key": "phase",
+            "expected": "done"
+          },
+          {
+            "type": "SetBlackboard",
+            "name": "mark-done",
+            "key": "phase",
+            "value": "done"
+          }
+        ]
+      }
+    ]
+  }
+}

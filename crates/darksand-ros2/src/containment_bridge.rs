@@ -80,6 +80,53 @@ pub struct HaltOutcome {
     pub log_ok: bool,
 }
 
+/// Halt critical-path latency histogram (steps 1–4, milliseconds).
+///
+/// Bounded ring (1024 samples): steady-state memory on long-lived robots.
+/// Percentiles are computed over a sorted copy; empty input yields 0s so
+/// dashboards never see `NaN`.
+#[derive(Debug, Clone, Default)]
+pub struct HaltMetrics {
+    samples_ms: Vec<u64>,
+}
+
+impl HaltMetrics {
+    const CAP: usize = 1024;
+
+    /// Record one halt critical-path sample.
+    pub fn record(&mut self, elapsed_ms: u64) {
+        if self.samples_ms.len() >= Self::CAP {
+            self.samples_ms.remove(0);
+        }
+        self.samples_ms.push(elapsed_ms);
+    }
+
+    /// `(count, p50_ms, p99_ms, max_ms)`.
+    pub fn stats(&self) -> (u64, u64, u64, u64) {
+        if self.samples_ms.is_empty() {
+            return (0, 0, 0, 0);
+        }
+        let mut sorted = self.samples_ms.clone();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        let pct = |p: f64| sorted[((p * n as f64).ceil() as usize).saturating_sub(1).min(n - 1)];
+        (n as u64, pct(0.50), pct(0.99), sorted[n - 1])
+    }
+
+    /// JSON snapshot for dashboards and audit bundles.
+    pub fn to_json(&self) -> serde_json::Value {
+        let (count, p50, p99, max) = self.stats();
+        serde_json::json!({
+            "halt_count": count,
+            "critical_path_ms_p50": p50,
+            "critical_path_ms_p99": p99,
+            "critical_path_ms_max": max,
+            "budget_ms": 50,
+            "over_budget": self.samples_ms.iter().filter(|&&ms| ms > 50).count(),
+        })
+    }
+}
+
 /// Bridge between the containment supervisor and ROS2 actuator subsystems.
 ///
 /// Created at startup via [`ContainmentBridge::new`]. Run as a long-lived
@@ -102,6 +149,8 @@ pub struct ContainmentBridge {
     /// Outcome of the most recent halt (critical-path fields set
     /// synchronously; zero-vel counts filled when the 3 s loop completes).
     last_outcome: Arc<RwLock<Option<HaltOutcome>>>,
+    /// Critical-path latency samples across all halts (bounded ring).
+    halt_metrics: Arc<tokio::sync::Mutex<HaltMetrics>>,
 }
 
 impl ContainmentBridge {
@@ -145,6 +194,7 @@ impl ContainmentBridge {
             zero_vel_ok_total: Arc::new(AtomicU32::new(0)),
             zero_vel_err_total: Arc::new(AtomicU32::new(0)),
             last_outcome: Arc::new(RwLock::new(None)),
+            halt_metrics: Arc::new(tokio::sync::Mutex::new(HaltMetrics::default())),
         };
         (bridge, idle_rx)
     }
@@ -176,6 +226,50 @@ impl ContainmentBridge {
             self.zero_vel_ok_total.load(Ordering::Relaxed),
             self.zero_vel_err_total.load(Ordering::Relaxed),
         )
+    }
+
+    /// `(halt_count, p50_ms, p99_ms, max_ms)` over the bounded latency ring.
+    pub async fn halt_latency_stats(&self) -> (u64, u64, u64, u64) {
+        self.halt_metrics.lock().await.stats()
+    }
+
+    /// JSON snapshot of halt latency vs the 50 ms budget (dashboards).
+    pub async fn halt_metrics_json(&self) -> serde_json::Value {
+        self.halt_metrics.lock().await.to_json()
+    }
+
+    /// Export a signed audit bundle: all log records plus chain verification.
+    ///
+    /// Writes `{exported_at_ms, record_count, chain_verified, records}` to
+    /// `out_path` and returns `record_count`. Verification uses this bridge's
+    /// signing key, so a bundle exported with a foreign key fails closed.
+    /// Operators ship this file — not raw JSONL — to auditors.
+    pub async fn export_receipt_bundle(&self, out_path: &str) -> anyhow::Result<usize> {
+        use darksand_safety::verify_log_chain;
+
+        let content = tokio::fs::read_to_string(&self.log_path).await?;
+        let records: Vec<serde_json::Value> = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<_, _>>()?;
+        let verifying = self.signing_key.verifying_key();
+        let verified = verify_log_chain(&self.log_path, &verifying).is_ok();
+        let bundle = serde_json::json!({
+            "exported_at_ms": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+            "record_count": records.len(),
+            "chain_verified": verified,
+            "halt_metrics": self.halt_metrics_json().await,
+            "records": records,
+        });
+        tokio::fs::write(out_path, serde_json::to_string_pretty(&bundle)?).await?;
+        if !verified {
+            anyhow::bail!("receipt bundle written but chain verification FAILED");
+        }
+        Ok(records.len())
     }
 
     /// Run the bridge event loop.
@@ -301,6 +395,10 @@ impl ContainmentBridge {
                 critical_path_ms
             );
         }
+        self.halt_metrics
+            .lock()
+            .await
+            .record(u64::try_from(critical_path_ms).unwrap_or(u64::MAX));
 
         // Step 5 — Write supplementary signed robotics violation record.
         // Done AFTER actuators are safe (non-blocking I/O does not affect halt timing).
@@ -321,6 +419,7 @@ impl ContainmentBridge {
 
     /// Apply emergency halt with no associated violation record (lag recovery path).
     async fn apply_emergency_halt_unconditional(&mut self) {
+        let start = std::time::Instant::now();
         warn!("Unconditional emergency halt triggered (lag recovery)");
         self.halts_handled.fetch_add(1, Ordering::Relaxed);
         let cancel_ok = self.cancel_active_goal_timed(20).await;
@@ -348,6 +447,10 @@ impl ContainmentBridge {
             }
         });
         let _ = self.idle_tx.send(true);
+        self.halt_metrics
+            .lock()
+            .await
+            .record(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX));
         // No robotics record exists for the lag path (no original violation);
         // still publish an outcome so operators can see cancel/idle state.
         // log_ok=false distinguishes this from a fully recorded halt.
@@ -1064,5 +1167,70 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&log);
+    }
+
+    // ── Halt metrics + receipt export ────────────────────────────────────
+
+    #[test]
+    fn halt_metrics_empty_is_zero() {
+        let m = HaltMetrics::default();
+        assert_eq!(m.stats(), (0, 0, 0, 0));
+        assert_eq!(m.to_json()["halt_count"], 0);
+    }
+
+    #[test]
+    fn halt_metrics_percentiles_and_budget_count() {
+        let mut m = HaltMetrics::default();
+        for ms in 1u64..=100 {
+            m.record(ms);
+        }
+        let (count, p50, p99, max) = m.stats();
+        assert_eq!((count, p50, p99, max), (100, 50, 99, 100));
+        let j = m.to_json();
+        assert_eq!(j["over_budget"], 50);
+        assert_eq!(j["budget_ms"], 50);
+    }
+
+    /// Each handled halt appends one latency sample; the receipt bundle
+    /// verifies the chain and ships metrics + records to auditors.
+    /// Calls `handle_violation` directly (no bus timing involved).
+    #[tokio::test]
+    async fn halt_latency_and_receipt_bundle_export() {
+        let node = make_node().await;
+        let bus = ViolationEventBus::new();
+        let log = test_log();
+        let out = format!("{log}.bundle.json");
+        let _ = std::fs::remove_file(&log);
+        let _ = std::fs::remove_file(&out);
+
+        let (mut bridge, _idle_rx) = ContainmentBridge::new(
+            &bus,
+            Arc::clone(&node),
+            test_key(),
+            log.clone(),
+            String::new(),
+        );
+        assert_eq!(bridge.halt_latency_stats().await, (0, 0, 0, 0));
+
+        // Supervisor record first so the bridge's robotics record chains.
+        let sup = make_violation("");
+        sup.append_to_log(&log).unwrap();
+        bridge.handle_violation(&sup).await;
+
+        let (count, _, _, _) = bridge.halt_latency_stats().await;
+        assert_eq!(count, 1);
+        let metrics_json = bridge.halt_metrics_json().await;
+        assert_eq!(metrics_json["halt_count"], 1);
+
+        let exported = bridge.export_receipt_bundle(&out).await.unwrap();
+        assert_eq!(exported, 2, "supervisor + robotics records");
+        let bundle: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(bundle["chain_verified"], true);
+        assert_eq!(bundle["record_count"], 2);
+        assert_eq!(bundle["halt_metrics"]["halt_count"], 1);
+
+        let _ = std::fs::remove_file(&log);
+        let _ = std::fs::remove_file(&out);
     }
 }

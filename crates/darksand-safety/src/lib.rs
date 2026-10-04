@@ -11,5 +11,5 @@ pub use bounds::Bounds;
 pub use event_bus::{ContainmentEvent, ViolationEventBus};
 pub use guard::ContainmentGuard;
 pub use supervisor::Supervisor;
-pub use violation::{RoboticsContext, ViolationKind, ViolationRecord};
+pub use violation::{verify_log_chain, RoboticsContext, ViolationKind, ViolationRecord};
 pub use worker::{is_worker_mode, run_worker_loop};
