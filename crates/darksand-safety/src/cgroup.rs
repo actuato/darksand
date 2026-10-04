@@ -2,12 +2,17 @@ use crate::bounds::Bounds;
 
 /// CPU quota container backed by cgroups v2 on Linux.
 /// On non-Linux targets this is a no-op stub so the crate compiles everywhere.
+/// See [`CGroup::is_enforced`]: containment is NOT enforced off Linux.
 pub struct CGroup {
     #[cfg(target_os = "linux")]
     cgroup: cgroups_rs::fs::Cgroup,
 }
 
 impl CGroup {
+    /// Returns `true` only on Linux, where cgroup enforcement is real.
+    pub fn is_enforced() -> bool {
+        cfg!(target_os = "linux")
+    }
     /// Create a new cgroup scoped to `darksand_containment` with the given CPU bounds.
     pub fn new(bounds: &Bounds) -> Result<Self, String> {
         #[cfg(target_os = "linux")]

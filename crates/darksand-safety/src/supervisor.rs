@@ -11,6 +11,7 @@ use tokio::{
     process::{Child, ChildStdin, ChildStdout, Command},
     time::{timeout, Duration},
 };
+use tracing::{error, warn};
 
 struct WorkerHandle {
     child: Child,
@@ -51,6 +52,13 @@ pub struct Supervisor {
 impl Supervisor {
     /// Create a supervisor without a violation event bus.
     pub fn new(bounds: Bounds, signing_key: SigningKey, log_path: String) -> Self {
+        if !Self::containment_enforced() {
+            warn!(
+                "Supervisor created on non-Linux platform: cgroup containment is a \
+                 dev-only stub (timeout + SIGKILL where supported). Do not run \
+                 untrusted workloads here."
+            );
+        }
         Self {
             config: SupervisorConfig {
                 bounds,
@@ -74,6 +82,13 @@ impl Supervisor {
         log_path: String,
         event_bus: ViolationEventBus,
     ) -> Self {
+        if !Self::containment_enforced() {
+            warn!(
+                "Supervisor created on non-Linux platform: cgroup containment is a \
+                 dev-only stub (timeout + SIGKILL where supported). Do not run \
+                 untrusted workloads here."
+            );
+        }
         Self {
             config: SupervisorConfig {
                 bounds,
@@ -150,7 +165,12 @@ impl Supervisor {
             .ok_or_else(|| "could not get worker stdout".to_string())?;
         let stdout = BufReader::new(stdout);
 
-        self.attach_cgroup(pid)?;
+        // Attach to cgroup before taking ownership. On failure kill the child
+        // so a runaway worker is never left outside containment.
+        if let Err(e) = self.attach_cgroup(pid) {
+            let _ = child.start_kill();
+            return Err(e);
+        }
 
         self.worker = Some(WorkerHandle {
             child,
@@ -208,14 +228,19 @@ impl Supervisor {
     /// emit an event on the violation bus.
     ///
     /// The record is always written to the JSONL log before any event is emitted.
-    fn record_violation(&mut self, kind: ViolationKind, context: Value) {
+    /// Returns `true` when the record was persisted. On I/O failure the hash
+    /// chain is NOT advanced and no event is emitted, so a later successful
+    /// record still chains from the last persisted hash.
+    fn record_violation(&mut self, kind: ViolationKind, context: Value) -> bool {
         let record = ViolationRecord::new(
             kind,
             context,
             self.config.last_hash.clone(),
             &self.config.signing_key,
         );
-        let _ = record.append_to_log(&self.config.log_path);
+        if record.append_to_log(&self.config.log_path).is_err() {
+            return false;
+        }
         self.config.last_hash = record.hash.clone();
 
         // Emit after the record is committed. Non-blocking; safety does not depend
@@ -223,6 +248,16 @@ impl Supervisor {
         if let Some(bus) = &self.config.event_bus {
             bus.emit_violation(record);
         }
+        true
+    }
+
+    /// Returns `true` on Linux where cgroup + rlimit containment is enforced.
+    ///
+    /// On non-Linux targets process isolation is a dev-only stub (no cgroup,
+    /// timeout + SIGKILL only where supported). Do not run untrusted workloads
+    /// there and expect containment.
+    pub fn containment_enforced() -> bool {
+        cfg!(target_os = "linux")
     }
 
     /// Execute a job in the worker process.
@@ -269,7 +304,12 @@ impl Supervisor {
                 // Timeout or IO error — kill, reap, record, respawn.
                 self.kill_worker();
                 self.reap_worker().await;
-                self.record_violation(ViolationKind::Time, job);
+                if !self.record_violation(ViolationKind::Time, job) {
+                    error!(
+                        log_path = %self.config.log_path,
+                        "Violation occurred but the signed record could not be persisted"
+                    );
+                }
                 // Best-effort respawn; ignore failure (caller gets Err).
                 let _ = self.spawn_worker();
                 Err(ViolationKind::Time)
@@ -327,7 +367,7 @@ mod tests {
         let _ = std::fs::remove_file(&log);
 
         let mut sup = Supervisor::new_with_bus(bounds, signing_key, log.clone(), bus);
-        sup.record_violation(ViolationKind::Time, serde_json::json!({"test": true}));
+        assert!(sup.record_violation(ViolationKind::Time, serde_json::json!({"test": true})));
 
         let event = rx.try_recv().expect("event must be immediately available");
         let crate::event_bus::ContainmentEvent::Violation(r) = event;
@@ -335,6 +375,40 @@ mod tests {
         assert!(!r.hash.is_empty());
 
         let _ = std::fs::remove_file(&log);
+    }
+
+    #[test]
+    fn test_record_violation_log_failure_keeps_chain() {
+        // Point the log at a directory so append fails. Chain must not advance
+        // and no event may be emitted for the unpersisted record.
+        let bounds = Bounds::new(50, 100);
+        let signing_key = SigningKey::from_bytes(&[6u8; 32]);
+        let bus = ViolationEventBus::new();
+        let mut rx = bus.subscribe();
+        let dir = std::env::temp_dir()
+            .join("darksand_sup_fail_dir")
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::create_dir_all(&dir);
+
+        let mut sup = Supervisor::new_with_bus(bounds, signing_key, dir.clone(), bus);
+        assert!(!sup.record_violation(ViolationKind::Time, serde_json::json!({"t": 1})));
+        assert!(rx.try_recv().is_err(), "failed log must not emit");
+        assert!(
+            sup.config.last_hash.is_empty(),
+            "chain must not advance on I/O failure"
+        );
+
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_containment_enforced_matches_platform() {
+        assert_eq!(
+            Supervisor::containment_enforced(),
+            cfg!(target_os = "linux")
+        );
+        assert_eq!(crate::cgroup::CGroup::is_enforced(), cfg!(target_os = "linux"));
     }
 
     /// Full supervisor round-trip test.
