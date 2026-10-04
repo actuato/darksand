@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
@@ -142,6 +142,117 @@ impl ViolationRecord {
         )?;
         Ok(())
     }
+
+    /// Recompute this record's hash from its fields.
+    ///
+    /// Must stay in lockstep with `new_inner`'s canonical payload, or chain
+    /// verification will false-positive. Any field added to the signed payload
+    /// must be added here too.
+    fn recomputed_hash(&self) -> String {
+        let mut payload = serde_json::json!({
+            "id": self.id,
+            "timestamp": self.timestamp,
+            "violation_kind": self.violation_kind,
+            "context": self.context,
+            "previous_hash": self.previous_hash,
+        });
+        if let Some(ref r) = self.robotics {
+            payload["robotics"] =
+                serde_json::to_value(r).expect("RoboticsContext is serializable");
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(payload.to_string().as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+}
+
+/// Postmortem summary of a JSONL violation log for offline analysis.
+///
+/// Counts records by kind and robotics presence plus the wall-clock span, so
+/// operators can triage *why halts fired* without replaying the full file.
+/// Pair with [`verify_log_chain`]: summarize first, then verify integrity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LogSummary {
+    pub records: usize,
+    pub time_violations: usize,
+    pub cpu_violations: usize,
+    pub robotics_records: usize,
+    pub first_timestamp: Option<String>,
+    pub last_timestamp: Option<String>,
+}
+
+/// Summarize the log at `path`. Fails on missing file or corrupt JSON
+/// (a postmortem tool must not silently skip evidence).
+pub fn summarize_log(path: &str) -> Result<LogSummary, String> {
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut summary = LogSummary {
+        records: 0,
+        time_violations: 0,
+        cpu_violations: 0,
+        robotics_records: 0,
+        first_timestamp: None,
+        last_timestamp: None,
+    };
+    for (idx, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: ViolationRecord =
+            serde_json::from_str(line).map_err(|e| format!("line {idx}: bad JSON: {e}"))?;
+        summary.records += 1;
+        match record.violation_kind {
+            ViolationKind::Time => summary.time_violations += 1,
+            ViolationKind::Cpu => summary.cpu_violations += 1,
+        }
+        if record.robotics.is_some() {
+            summary.robotics_records += 1;
+        }
+        let ts = record.timestamp.to_rfc3339();
+        if summary.first_timestamp.is_none() {
+            summary.first_timestamp = Some(ts.clone());
+        }
+        summary.last_timestamp = Some(ts);
+    }
+    Ok(summary)
+}
+
+/// Verify a JSONL violation log: hash links, recomputed hashes, signatures.
+///
+/// Returns the number of records on success. Fails on the first broken link,
+/// hash mismatch, undecodable signature, or bad signature.
+pub fn verify_log_chain(path: &str, verifying_key: &VerifyingKey) -> Result<usize, String> {
+    use ed25519_dalek::Signature;
+
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut previous_hash = String::new();
+    let mut count = 0;
+    for (idx, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let record: ViolationRecord =
+            serde_json::from_str(line).map_err(|e| format!("line {idx}: bad JSON: {e}"))?;
+        if record.previous_hash != previous_hash {
+            return Err(format!(
+                "line {idx}: broken chain: previous_hash mismatch"
+            ));
+        }
+        if record.recomputed_hash() != record.hash {
+            return Err(format!("line {idx}: hash mismatch (tampered fields)"));
+        }
+        let sig_bytes = STANDARD
+            .decode(record.signature.trim())
+            .map_err(|e| format!("line {idx}: bad signature encoding: {e}"))?;
+        let sig = Signature::from_slice(&sig_bytes)
+            .map_err(|e| format!("line {idx}: bad signature bytes: {e}"))?;
+        verifying_key
+            .verify(record.hash.as_bytes(), &sig)
+            .map_err(|_| format!("line {idx}: bad signature"))?;
+        previous_hash = record.hash.clone();
+        count += 1;
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -245,6 +356,155 @@ mod tests {
         let parsed: ViolationRecord =
             serde_json::from_str(content.lines().next().unwrap()).unwrap();
         assert_eq!(parsed.hash, record.hash);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn verify_log_chain_accepts_valid_chain() {
+        let key = test_key();
+        let path = std::env::temp_dir()
+            .join("darksand_verify_valid_test.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_file(&path);
+
+        let r1 = ViolationRecord::new(
+            ViolationKind::Time,
+            serde_json::json!({"n": 1}),
+            String::new(),
+            &key,
+        );
+        r1.append_to_log(&path).unwrap();
+        let r2 = ViolationRecord::new_with_robotics(
+            ViolationKind::Cpu,
+            serde_json::json!({"n": 2}),
+            r1.hash.clone(),
+            &key,
+            RoboticsContext::emergency_halt(None, None, None),
+        );
+        r2.append_to_log(&path).unwrap();
+
+        let count = super::verify_log_chain(&path, &key.verifying_key()).unwrap();
+        assert_eq!(count, 2);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn verify_log_chain_rejects_tampered_record() {
+        let key = test_key();
+        let path = std::env::temp_dir()
+            .join("darksand_verify_tamper_test.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_file(&path);
+
+        let r1 = ViolationRecord::new(
+            ViolationKind::Time,
+            serde_json::json!({"n": 1}),
+            String::new(),
+            &key,
+        );
+        r1.append_to_log(&path).unwrap();
+
+        // Tamper: rewrite the context line without re-signing.
+        let content = std::fs::read_to_string(&path).unwrap();
+        let tampered = content.replace("\"n\":1", "\"n\":999");
+        assert_ne!(content, tampered, "tamper must change the file");
+        std::fs::write(&path, tampered).unwrap();
+
+        let err = super::verify_log_chain(&path, &key.verifying_key()).unwrap_err();
+        assert!(err.contains("hash mismatch"), "got: {err}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn verify_log_chain_rejects_broken_link_and_wrong_key() {        let key = test_key();
+        let other = SigningKey::from_bytes(&[9u8; 32]);
+        let path = std::env::temp_dir()
+            .join("darksand_verify_link_test.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_file(&path);
+
+        let r1 = ViolationRecord::new(
+            ViolationKind::Time,
+            serde_json::json!({}),
+            String::new(),
+            &key,
+        );
+        r1.append_to_log(&path).unwrap();
+        // Second record chains from a bogus hash instead of r1's.
+        let r2 = ViolationRecord::new(
+            ViolationKind::Cpu,
+            serde_json::json!({}),
+            "deadbeef".to_string(),
+            &key,
+        );
+        r2.append_to_log(&path).unwrap();
+
+        let err = super::verify_log_chain(&path, &key.verifying_key()).unwrap_err();
+        assert!(err.contains("broken chain"), "got: {err}");
+
+        // Fix the link but verify with the wrong key → signature failure.
+        let _ = std::fs::remove_file(&path);
+        let r1 = ViolationRecord::new(
+            ViolationKind::Time,
+            serde_json::json!({}),
+            String::new(),
+            &key,
+        );
+        r1.append_to_log(&path).unwrap();
+        let err = super::verify_log_chain(&path, &other.verifying_key()).unwrap_err();
+        assert!(err.contains("signature"), "got: {err}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn summarize_log_counts_kinds_and_span() {
+        let key = test_key();
+        let path = std::env::temp_dir()
+            .join("darksand_summarize_test.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_file(&path);
+
+        let r1 = ViolationRecord::new(
+            ViolationKind::Time,
+            serde_json::json!({}),
+            String::new(),
+            &key,
+        );
+        r1.append_to_log(&path).unwrap();
+        let r2 = ViolationRecord::new_with_robotics(
+            ViolationKind::Cpu,
+            serde_json::json!({}),
+            r1.hash.clone(),
+            &key,
+            RoboticsContext::emergency_halt(None, None, None),
+        );
+        r2.append_to_log(&path).unwrap();
+
+        let s = super::summarize_log(&path).unwrap();
+        assert_eq!(s.records, 2);
+        assert_eq!((s.time_violations, s.cpu_violations), (1, 1));
+        assert_eq!(s.robotics_records, 1);
+        assert!(s.first_timestamp.is_some() && s.last_timestamp.is_some());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn summarize_log_fails_closed_on_corrupt_line() {
+        let path = std::env::temp_dir()
+            .join("darksand_summarize_corrupt_test.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(&path, "{oops\n").unwrap();
+        let err = super::summarize_log(&path).unwrap_err();
+        assert!(err.contains("bad JSON"), "got: {err}");
         let _ = std::fs::remove_file(&path);
     }
 }

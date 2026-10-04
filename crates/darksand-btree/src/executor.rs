@@ -1,9 +1,9 @@
 //! Behavior-tree executor with lifecycle management.
 //!
 //! Ticks a tree until it reaches a terminal status or a bound
-//! (max ticks, deadline, external cancel) trips. WAL checkpoints and the
-//! tree visualizer are deferred; the per-tick JSON observer is kept for
-//! live mission monitoring.
+//! (max ticks, deadline, external cancel) trips. The per-tick JSON observer
+//! is kept for live mission monitoring; crash recovery journals through the
+//! optional WAL ([`crate::wal`]) — attach with [`BTreeExecutor::with_wal`].
 
 use crate::core::{BTreeContext, BTreeNode, NodeStatus};
 use crate::result::ExecutionResult;
@@ -46,6 +46,9 @@ pub struct BTreeExecutor {
     /// JSON snapshot `{"tick": N, "status": "...", "tree": {...}}` to this
     /// channel. Best-effort — a lagged receiver never stalls execution.
     tick_observer: Option<watch::Sender<serde_json::Value>>,
+    /// Optional WAL path: one [`crate::wal::WalEntry`] appended per tick.
+    /// Best-effort (warn on failure, never fail the mission for the journal).
+    wal_path: Option<String>,
 }
 
 impl BTreeExecutor {
@@ -54,6 +57,7 @@ impl BTreeExecutor {
         Self {
             config: ExecutorConfig::default(),
             tick_observer: None,
+            wal_path: None,
         }
     }
 
@@ -62,6 +66,7 @@ impl BTreeExecutor {
         Self {
             config,
             tick_observer: None,
+            wal_path: None,
         }
     }
 
@@ -92,6 +97,14 @@ impl BTreeExecutor {
     /// Set tick delay for rate limiting (builder pattern)
     pub fn with_tick_delay(mut self, delay: Duration) -> Self {
         self.config.tick_delay = Some(delay);
+        self
+    }
+
+    /// Journal every tick to a WAL file for crash recovery (builder pattern).
+    ///
+    /// See [`crate::wal`] for resume semantics and documented limits.
+    pub fn with_wal(mut self, path: impl Into<String>) -> Self {
+        self.wal_path = Some(path.into());
         self
     }
 
@@ -196,6 +209,18 @@ impl BTreeExecutor {
                     "status": format!("{:?}", status),
                     "tree": tree_json,
                 }));
+            }
+
+            if let Some(ref wal_path) = self.wal_path {
+                let entry = crate::wal::WalEntry {
+                    tick: tick_count,
+                    status: format!("{:?}", status),
+                    blackboard: context.blackboard.snapshot().await,
+                    tree: tree.to_json().unwrap_or_else(|_| serde_json::Value::Null),
+                };
+                if let Err(e) = crate::wal::append_wal(wal_path, &entry) {
+                    warn!("WAL append failed at tick {}: {}", tick_count, e);
+                }
             }
 
             match status {

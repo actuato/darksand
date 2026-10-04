@@ -4,6 +4,7 @@
 //! this module). Covers only what deterministic missions need: node trait,
 //! shared blackboard, and execution context with an optional ROS2 handle.
 //! Deferred: LLM planners, WAL checkpoints, tool registry, visualizer.
+//! Mission documents load via [`crate::mission`] (`darksand-mission.v1`).
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -89,6 +90,22 @@ impl Blackboard {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         )
+    }
+
+    /// Replace the full key-value state from a snapshot (WAL resume).
+    ///
+    /// Returns an error when `snapshot` is not a JSON object, leaving the
+    /// current state untouched.
+    pub async fn restore(&self, snapshot: &Value) -> Result<()> {
+        let map = snapshot
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("blackboard snapshot must be a JSON object"))?;
+        let mut inner = self.inner.write().await;
+        inner.clear();
+        for (k, v) in map {
+            inner.insert(k.clone(), v.clone());
+        }
+        Ok(())
     }
 }
 

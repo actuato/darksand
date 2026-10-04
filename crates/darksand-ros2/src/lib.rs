@@ -48,6 +48,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 use tracing::{debug, info, warn};
@@ -885,6 +886,11 @@ pub struct Ros2Node {
 
     // Log of zero-velocity commands for test verification.
     cmd_vel_log: Arc<RwLock<Vec<[f64; 2]>>>,
+
+    // Fault injection: number of upcoming `/cmd_vel` publishes that must fail.
+    // Test-only; production code never sets this. Lets halt tests prove that
+    // zero-velocity errors are counted instead of silently warned away.
+    cmd_vel_failures_remaining: Arc<AtomicU32>,
 }
 
 #[cfg(not(feature = "ros2"))]
@@ -921,6 +927,7 @@ impl Ros2Node {
             active_nav_handle: Arc::new(RwLock::new(None)),
             last_velocity: Arc::new(RwLock::new([0.0, 0.0])),
             cmd_vel_log: Arc::new(RwLock::new(Vec::new())),
+            cmd_vel_failures_remaining: Arc::new(AtomicU32::new(0)),
         })
     }
 
@@ -1055,7 +1062,27 @@ impl Ros2Node {
     ///
     /// The containment bridge calls this every 100 ms for 3 s from a dedicated task.
     /// This method is intentionally non-blocking.
+    ///
+    /// When fault injection is armed via [`Self::fail_next_zero_vel_publishes`],
+    /// the next N calls return `Err` without touching the log or velocity, so
+    /// halt tests can prove a dead `/cmd_vel` path is counted, not hidden.
     pub async fn publish_zero_velocity(&self) -> Result<()> {
+        // Fault injection: consume one failure token if armed. CAS loop keeps
+        // MSRV (no `fetch_update`, stabilized later) and is contention-free
+        // in practice (single test thread arms it).
+        loop {
+            let n = self.cmd_vel_failures_remaining.load(Ordering::Relaxed);
+            if n == 0 {
+                break;
+            }
+            if self
+                .cmd_vel_failures_remaining
+                .compare_exchange_weak(n, n - 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Err(anyhow::anyhow!("injected /cmd_vel publish failure"));
+            }
+        }
         debug!("Publishing zero velocity to /cmd_vel (stub)");
         let mut log = self.cmd_vel_log.write().await;
         log.push([0.0, 0.0]);
@@ -1066,6 +1093,11 @@ impl Ros2Node {
         }
         *self.last_velocity.write().await = [0.0, 0.0];
         Ok(())
+    }
+
+    /// Fail the next `n` zero-velocity publishes (test-only fault injection).
+    pub fn fail_next_zero_vel_publishes(&self, n: u32) {
+        self.cmd_vel_failures_remaining.store(n, Ordering::Relaxed);
     }
 
     /// Publish an arbitrary velocity command (stub — logs [linear_x, angular_z]).
