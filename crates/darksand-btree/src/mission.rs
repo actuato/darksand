@@ -41,8 +41,73 @@ pub struct Mission {
     /// Human-readable mission name (used as documentation only).
     #[serde(default)]
     pub name: String,
+    /// How the instruction was classified before compilation. Anything but
+    /// `Clear` is documentation today: the loader accepts the mission and
+    /// records the author's judgment for auditors.
+    #[serde(default)]
+    pub disposition: Disposition,
+    /// Declared optimality criterion for future planners. Documentary today:
+    /// the loader validates the value and exposes it for cost accounting.
+    #[serde(default)]
+    pub optimality: Option<Optimality>,
+    /// Declarative goal in DNF: a list of conjuncts, each a list of literals.
+    /// The mission succeeds (by declaration) when any conjunct holds. Used by
+    /// [`Mission::goal_satisfied`] for pre/post checks, not by the executor.
+    #[serde(default)]
+    pub goal: Option<GoalSpec>,
+    /// Estimated per-node costs keyed by node `name`. [`Mission::estimated_cost`]
+    /// sums them; [`Mission::unmatched_costs`] reports names with no matching
+    /// node so stale estimates surface instead of silently vanishing.
+    #[serde(default)]
+    pub costs: std::collections::HashMap<String, f64>,
     /// Root of the behavior tree.
     pub root: NodeSpec,
+}
+
+/// Instruction disposition, resolved before compilation (BT-ACTION pattern).
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+pub enum Disposition {
+    /// Clear, executable instruction.
+    #[default]
+    Clear,
+    /// Ambiguous: needs operator clarification; recorded, still compilable.
+    Ambiguous,
+    /// Infeasible for this robot: recorded so rejection has a reason.
+    Infeasible,
+    /// Feasible but beyond current knowledge: may need new actions.
+    Modification,
+}
+
+/// Optimality criterion for planners (OBTEA/HOBTEA pattern).
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub enum Optimality {
+    MinExpectedCost,
+    MinWorstCaseCost,
+    RobustUnderNFailures,
+}
+
+/// Goal in disjunctive normal form: any conjunct satisfied ⇒ goal holds.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalSpec {
+    pub dnf: Vec<Vec<GoalLiteral>>,
+}
+
+/// One goal literal: blackboard `key` must equal `expected`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalLiteral {
+    pub key: String,
+    pub expected: serde_json::Value,
+}
+
+/// Stable path-qualified node identity for audit and hot-swap lookup.
+/// Paths look like `root`, `root.children[0]`, `root.child` (decorators).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePath {
+    pub path: String,
+    pub node_type: &'static str,
+    pub name: String,
 }
 
 /// Declarative form of one BT node.
@@ -181,6 +246,124 @@ impl Mission {
             tracing::debug!("mission has no name; proceeding (name is documentary)");
         }
         build_node(self.root)
+    }
+
+    /// Validate the envelope without building (for linters and auditors).
+    pub fn parse(s: &str) -> Result<Self> {
+        let mission: Mission =
+            serde_json::from_str(s).context("mission document is not valid JSON")?;
+        if mission.version != "darksand-mission.v1" {
+            anyhow::bail!(
+                "unsupported mission version {:?} (expected \"darksand-mission.v1\")",
+                mission.version
+            );
+        }
+        Ok(mission)
+    }
+
+    /// Path-qualified index of every node in the mission (`root…`).
+    pub fn index(&self) -> Vec<NodePath> {
+        let mut out = Vec::new();
+        index_spec(&self.root, "root".to_string(), &mut out);
+        out
+    }
+
+    /// Sum of the `costs` table. Pair with [`Mission::unmatched_costs`] so
+    /// stale per-node estimates cannot silently vanish after a rename.
+    pub fn estimated_cost(&self) -> f64 {
+        self.costs.values().sum()
+    }
+
+    /// Cost-table names with no matching node `name` in the tree.
+    pub fn unmatched_costs(&self) -> Vec<String> {
+        let index = self.index();
+        let names: std::collections::HashSet<&str> =
+            index.iter().map(|n| n.name.as_str()).collect();
+        let mut missing: Vec<String> = self
+            .costs
+            .keys()
+            .filter(|k| !names.contains(k.as_str()))
+            .cloned()
+            .collect();
+        missing.sort();
+        missing
+    }
+
+    /// True when any DNF conjunct holds against a blackboard snapshot.
+    /// An empty DNF never holds (no declared goal ⇒ nothing to satisfy).
+    pub fn goal_satisfied(&self, snapshot: &serde_json::Value) -> bool {
+        let Some(goal) = &self.goal else {
+            return false;
+        };
+        let obj = snapshot.as_object();
+        goal.dnf.iter().any(|conjunct| {
+            !conjunct.is_empty()
+                && conjunct.iter().all(|lit| {
+                    obj.and_then(|m| m.get(&lit.key)) == Some(&lit.expected)
+                })
+        })
+    }
+}
+
+fn spec_type_name(spec: &NodeSpec) -> &'static str {
+    match spec {
+        NodeSpec::Sequence { .. } => "Sequence",
+        NodeSpec::Selector { .. } => "Selector",
+        NodeSpec::Parallel { .. } => "Parallel",
+        NodeSpec::Inverter { .. } => "Inverter",
+        NodeSpec::Repeat { .. } => "Repeat",
+        NodeSpec::Retry { .. } => "Retry",
+        NodeSpec::Timeout { .. } => "Timeout",
+        NodeSpec::CheckBlackboard { .. } => "CheckBlackboard",
+        NodeSpec::SetBlackboard { .. } => "SetBlackboard",
+        NodeSpec::RosTopicPublish { .. } => "RosTopicPublish",
+        NodeSpec::RosTopicSubscribe { .. } => "RosTopicSubscribe",
+        NodeSpec::RosServiceCall { .. } => "RosServiceCall",
+    }
+}
+
+fn spec_name(spec: &NodeSpec) -> &str {
+    match spec {
+        NodeSpec::Sequence { name, .. }
+        | NodeSpec::Selector { name, .. }
+        | NodeSpec::Parallel { name, .. }
+        | NodeSpec::Inverter { name, .. }
+        | NodeSpec::Repeat { name, .. }
+        | NodeSpec::Retry { name, .. }
+        | NodeSpec::Timeout { name, .. }
+        | NodeSpec::CheckBlackboard { name, .. }
+        | NodeSpec::SetBlackboard { name, .. }
+        | NodeSpec::RosTopicPublish { name, .. }
+        | NodeSpec::RosTopicSubscribe { name, .. }
+        | NodeSpec::RosServiceCall { name, .. } => name,
+    }
+}
+
+fn spec_children(spec: &NodeSpec) -> Vec<(&NodeSpec, String)> {
+    match spec {
+        NodeSpec::Sequence { children, .. }
+        | NodeSpec::Selector { children, .. }
+        | NodeSpec::Parallel { children, .. } => children
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c, format!("children[{i}]")))
+            .collect(),
+        NodeSpec::Inverter { child, .. }
+        | NodeSpec::Repeat { child, .. }
+        | NodeSpec::Retry { child, .. }
+        | NodeSpec::Timeout { child, .. } => vec![(child.as_ref(), "child".to_string())],
+        _ => vec![],
+    }
+}
+
+fn index_spec(spec: &NodeSpec, path: String, out: &mut Vec<NodePath>) {
+    out.push(NodePath {
+        path: path.clone(),
+        node_type: spec_type_name(spec),
+        name: spec_name(spec).to_string(),
+    });
+    for (child, seg) in spec_children(spec) {
+        index_spec(child, format!("{path}.{seg}"), out);
     }
 }
 
@@ -480,5 +663,69 @@ mod tests {
                 "root": {"type": "RosTopicPublish", "name": "p", "topic": "/cmd_vel"}}"#,
         );
         assert!(err.contains("`ros2` feature"), "got: {err}");
+    }
+
+    #[test]
+    fn header_goal_disposition_optimality_costs() {
+        let m = Mission::parse(
+            r#"{"version": "darksand-mission.v1", "name": "h",
+                "disposition": "Modification",
+                "optimality": "MinExpectedCost",
+                "costs": {"a": 1.5, "b": 2.5, "ghost": 9.0},
+                "goal": {"dnf": [[{"key": "phase", "expected": "done"}]]},
+                "root": {"type": "Sequence", "name": "m", "children": [
+                    {"type": "SetBlackboard", "name": "a", "key": "phase", "value": "done"},
+                    {"type": "SetBlackboard", "name": "b", "key": "other", "value": 1}
+                ]}}"#,
+        )
+        .unwrap();
+        assert_eq!(m.disposition, Disposition::Modification);
+        assert_eq!(m.optimality, Some(Optimality::MinExpectedCost));
+        assert_eq!(m.estimated_cost(), 13.0);
+        assert_eq!(m.unmatched_costs(), vec!["ghost".to_string()]);
+        assert!(m.goal_satisfied(&serde_json::json!({"phase": "done"})));
+        assert!(!m.goal_satisfied(&serde_json::json!({"phase": "starting"})));
+        assert!(!m.goal_satisfied(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn header_defaults_when_absent() {
+        let m = Mission::parse(
+            r#"{"version": "darksand-mission.v1",
+                "root": {"type": "Sequence", "name": "s", "children": []}}"#,
+        )
+        .unwrap();
+        assert_eq!(m.disposition, Disposition::Clear);
+        assert_eq!(m.optimality, None);
+        assert_eq!(m.estimated_cost(), 0.0);
+        assert!(!m.goal_satisfied(&serde_json::json!({"anything": 1})));
+    }
+
+    #[test]
+    fn index_assigns_stable_paths() {
+        let m = Mission::parse(
+            r#"{"version": "darksand-mission.v1",
+                "root": {"type": "Sequence", "name": "m", "children": [
+                    {"type": "Retry", "name": "r", "max_retries": 1,
+                     "child": {"type": "SetBlackboard", "name": "a", "key": "k", "value": 1}}
+                ]}}"#,
+        )
+        .unwrap();
+        let paths: Vec<(String, String)> = m
+            .index()
+            .into_iter()
+            .map(|n| (n.path, n.node_type.to_string()))
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                ("root".to_string(), "Sequence".to_string()),
+                ("root.children[0]".to_string(), "Retry".to_string()),
+                (
+                    "root.children[0].child".to_string(),
+                    "SetBlackboard".to_string()
+                ),
+            ]
+        );
     }
 }

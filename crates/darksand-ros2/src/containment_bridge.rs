@@ -78,6 +78,10 @@ pub struct HaltOutcome {
     pub budget_exceeded: bool,
     /// Supplementary robotics violation record was persisted.
     pub log_ok: bool,
+    /// Robustness margin: `50 - critical_path_ms` (negative when over budget).
+    /// Answers "how close did this halt come to missing its deadline" without
+    /// needing sensor-side STL instrumentation.
+    pub margin_ms: i64,
 }
 
 /// Halt critical-path latency histogram (steps 1–4, milliseconds).
@@ -121,6 +125,7 @@ impl HaltMetrics {
             "critical_path_ms_p50": p50,
             "critical_path_ms_p99": p99,
             "critical_path_ms_max": max,
+            "critical_path_margin_ms_min": 50i64 - max as i64,
             "budget_ms": 50,
             "over_budget": self.samples_ms.iter().filter(|&&ms| ms > 50).count(),
         })
@@ -414,6 +419,7 @@ impl ContainmentBridge {
             idle_asserted: true,
             budget_exceeded,
             log_ok,
+            margin_ms: 50 - u64::try_from(critical_path_ms).unwrap_or(u64::MAX) as i64,
         });
     }
 
@@ -447,10 +453,8 @@ impl ContainmentBridge {
             }
         });
         let _ = self.idle_tx.send(true);
-        self.halt_metrics
-            .lock()
-            .await
-            .record(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX));
+        let lag_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.halt_metrics.lock().await.record(lag_ms);
         // No robotics record exists for the lag path (no original violation);
         // still publish an outcome so operators can see cancel/idle state.
         // log_ok=false distinguishes this from a fully recorded halt.
@@ -462,6 +466,7 @@ impl ContainmentBridge {
             idle_asserted: true,
             budget_exceeded: false,
             log_ok: false,
+            margin_ms: 50 - lag_ms as i64,
         });
     }
 
@@ -1105,6 +1110,11 @@ mod tests {
             assert_eq!(o.zero_vel_attempted, 30);
             assert!(o.idle_asserted);
             assert!(o.log_ok, "robotics record must persist");
+            assert!(
+                o.margin_ms > 0 && o.margin_ms <= 50,
+                "stub halt must clear the budget with margin, got {}",
+                o.margin_ms
+            );
         }
         // Zero-vel loop runs in background: ≥2 publishes within 350 ms total.
         tokio::time::sleep(Duration::from_millis(250)).await;

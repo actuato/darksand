@@ -177,4 +177,42 @@ mod tests {
         assert_eq!(entries[0].blackboard["leg"], 2);
         let _ = std::fs::remove_file(&path);
     }
+
+    /// Crash-mid-mission recovery: stop early with WAL, resume from the
+    /// journal, run to completion. The resumed run sees leg 1's state.
+    #[tokio::test]
+    async fn crash_mid_mission_resumes_to_success() {
+        let path = std::env::temp_dir()
+            .join("darksand_wal_crash_test.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_file(&path);
+
+        // Repeat needs 2 ticks: first execute() is "killed" via max_ticks=1.
+        let mission = r#"{"version": "darksand-mission.v1", "name": "crash",
+            "root": {"type": "Repeat", "name": "twice", "count": 2,
+                "child": {"type": "SetBlackboard", "name": "leg", "key": "n", "value": 7}}}"#;
+        let mut tree = crate::mission::mission_from_str(mission).unwrap();
+        let mut ctx = crate::core::BTreeContext::new();
+        let partial = crate::BTreeExecutor::new()
+            .with_max_ticks(1)
+            .with_wal(&path)
+            .execute(&mut *tree, &mut ctx)
+            .await
+            .unwrap();
+        assert!(partial.max_ticks_reached);
+
+        // "Restart": rebuild from mission + WAL and run to completion.
+        let (mut tree2, mut ctx2) = resume_mission_from_wal(mission, &path).await.unwrap();
+        let done = crate::BTreeExecutor::new()
+            .execute(&mut *tree2, &mut ctx2)
+            .await
+            .unwrap();
+        assert!(done.is_success());
+        assert_eq!(
+            ctx2.blackboard.get("n").await,
+            Some(serde_json::json!(7))
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 }

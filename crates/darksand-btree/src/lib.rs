@@ -22,7 +22,10 @@ pub mod runtime {
 }
 
 pub use executor::{BTreeExecutor, ExecutorConfig};
-pub use mission::{mission_from_file, mission_from_str, Mission, NodeSpec};
+pub use mission::{
+    mission_from_file, mission_from_str, Disposition, GoalLiteral, GoalSpec, Mission, NodePath,
+    NodeSpec, Optimality,
+};
 pub use result::ExecutionResult;
 pub use wal::{append_wal, read_wal, resume_mission_from_wal, WalEntry};
 
@@ -39,6 +42,7 @@ pub mod prelude {
     };
     pub use crate::{BTreeExecutor, ExecutionResult, ExecutorConfig};
     pub use crate::{mission_from_file, mission_from_str, Mission, NodeSpec};
+    pub use crate::{Disposition, GoalLiteral, GoalSpec, NodePath, Optimality};
     pub use crate::{append_wal, read_wal, resume_mission_from_wal, WalEntry};
     pub use async_trait::async_trait;
     pub use std::sync::Arc;

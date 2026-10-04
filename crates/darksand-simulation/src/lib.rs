@@ -2,6 +2,10 @@
 //!
 //! Provides virtual environments and chaos testing for AI agents.
 
+pub mod manifest;
+
+pub use manifest::SimManifest;
+
 use anyhow::Result;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
