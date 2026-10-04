@@ -21,67 +21,54 @@ the audit trail is signed.
 
 ## How it works
 
-```
-                        ┌─────────────────────┐
-                        │  mission file (JSON) │
-                        │ darksand-mission.v1  │
-                        └──────────┬──────────┘
-                                   │ compile (deny unknown fields)
-                                   v
-                        ┌─────────────────────┐
-                        │  behavior tree       │◄──── WAL journal (per tick)
-                        │  Sequence/Selector/ │      resume from last snapshot
-                        │  Parallel/Retry/…    │
-                        └──────────┬──────────┘
-                                   │ tick (max-ticks, deadline, cancel)
-                                   v
-┌──────────────┐        ┌─────────────────────┐        ┌──────────────┐
-│ signed policy │──────►│  contained executor  │──────►│ ROS 2 / Nav2   │
-│ allow/deny    │  gate │  supervisor worker   │  goal  │ navigate,      │
-│ per robot mode│       │  cgroup + timeout    │        │ /cmd_vel       │
-└──────────────┘        └──────────┬──────────┘        └──────┬───────┘
-                                   │ violation bus              │
-                                   v                            │
-                        ┌─────────────────────┐                 │
-                        │  containment bridge  │◄────────────────┘
-                        │  1. capture state     │
-                        │  2. cancel Nav2 20ms  │
-                        │  3. zero-vel 3s loop  │
-                        │  4. assert safe-idle  │──► BT + HTTP gates
-                        │  5. signed record     │
-                        └──────────┬──────────┘
-                                   v
-                        ┌─────────────────────┐        ┌──────────────┐
-                        │  receipts            │──────►│ fleet / audit │
-                        │  hash-chained JSONL  │ export │ dashboards    │
-                        │  verify + summarize  │        │               │
-                        └─────────────────────┘        └──────────────┘
+```mermaid
+flowchart TD
+    Mission["mission file (JSON)\ndarksand-mission.v1"] --> Compile["compile\nreject unknown fields"]
+    Compile --> Tree["behavior tree\nSequence / Selector / Parallel / Retry / …"]
+    Tree <--> WAL["WAL journal (per tick)\nresume from last snapshot"]
+    Policy["signed policy\nallow / deny per robot mode"] --> Exec
+    Tree --> Exec["contained executor\nmax-ticks · deadline · cancel"]
+    Exec --> ROS["ROS 2 / Nav2\nnavigate · /cmd_vel"]
+    ROS --> Bridge["containment bridge"]
+    Bus["violation bus"] --> Bridge
+    Bridge --> Gates["safe-idle gates\nBT + HTTP refuse new work"]
+    Bridge --> Receipts["receipts\nhash-chained JSONL"]
+    Receipts --> Audit["fleet / audit\nverify + summarize + export"]
 ```
 
-### Halt sequence (critical path budget: 50 ms)
+### Halt sequence (critical-path budget: 50 ms)
 
-```
-violation ──► capture robotics state (goal, pose, velocity)
-         ──► cancel Nav2 goal (hard timeout: 20 ms)
-         ──► spawn zero-velocity loop (30 x 100 ms = 3 s, counted ok/err)
-         ──► assert safe-idle (executors + handlers refuse new work)
-         ──► write signed robotics record (chained from supervisor record)
+```mermaid
+sequenceDiagram
+    participant S as Supervisor
+    participant B as Containment Bridge
+    participant N as Nav2
+    participant V as /cmd_vel
+    participant L as Signed Log
+
+    S->>B: violation event (record hash)
+    B->>B: capture robotics state (goal, pose, velocity)
+    B->>N: cancel active goal (hard timeout: 20 ms)
+    B->>V: spawn zero-velocity loop (30 x 100 ms = 3 s, ok/err counted)
+    B->>B: assert safe-idle (executors + handlers refuse new work)
+    B->>L: append robotics record (chained from supervisor record)
+    Note over B: outcome recorded: cancel_ok, zero-vel ok/errors,<br/>margin_ms vs budget, log_ok
 ```
 
-Every halt produces a `HaltOutcome` (`cancel_ok`, zero-vel ok/errors,
-`margin_ms` against the budget, `log_ok`) and feeds a bounded latency
-histogram (`p50`/`p99`/`max` + over-budget count). Margins answer "how close
-did we come to missing the deadline" without extra instrumentation.
+Every halt produces a `HaltOutcome` and feeds a bounded latency histogram
+(`p50`/`p99`/`max` + over-budget count). Margins answer "how close did we come
+to missing the deadline" without extra instrumentation.
 
 ### Run receipts
 
-```
-supervisor record ──► robotics record ──► … ──► verify_log_chain
-      hash                previous_hash        checks links,
-      signature           = supervisor hash    recomputed hashes, signatures
-
-summarize_log  → counts by kind, robotics presence, wall-clock span
-export_receipt_bundle → { records, chain_verified, halt_metrics } for auditors
+```mermaid
+flowchart LR
+    A["supervisor record\nhash + signature"] --> B["robotics record\nprevious_hash = supervisor hash"]
+    B --> C["…"]
+    C --> D["verify_log_chain\nlinks · recomputed hashes · signatures"]
+    D --> E["summarize_log\ncounts by kind · span"]
+    D --> F["export_receipt_bundle\nrecords + chain_verified + halt metrics"]
+    F --> G["auditors"]
 ```
 
 ## Layout
@@ -118,7 +105,7 @@ docker build -f docker/Dockerfile.ros2 .
 DARKSAND_POLICY_KEYS="tenant:key" cargo run -p darksand-policy
 ```
 
-Run a mission file through the contained executor (sketch):
+Run a mission file through the contained executor:
 
 ```rust
 let mut tree = darksand_btree::mission_from_file("missions/wharf-inspection.json")?;
