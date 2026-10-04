@@ -1,0 +1,30 @@
+[package]
+name = "darksand-policy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Standalone robotics policy service (SQLite, signed lifecycle commands)"
+
+[[bin]]
+name = "darksand-policy"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["net"] }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+hex = "0.4"
+ed25519-dalek = { workspace = true }
+rusqlite = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tower = { workspace = true }

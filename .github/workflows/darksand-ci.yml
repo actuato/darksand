@@ -1,0 +1,23 @@
+name: darksand CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable@v1
+      - run: cargo check --workspace
+      - run: cargo test --workspace
+      - run: cargo check -p darksand-btree --features ros2
+      - run: cargo test -p darksand-btree --features ros2
+
+  ros2-humble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f docker/Dockerfile.ros2 .

@@ -1,0 +1,22 @@
+# ROS 2 hardware build (Humble).
+# Stub builds need no ROS; this image verifies the real `r2r` bindings
+# (`--features ros2` / `ros2-live`) compile against a live distro.
+# Live Nav2/HIL runs additionally need nav2 + robot drivers on the host.
+FROM ros:humble-ros-base
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl build-essential pkg-config libssl-dev sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /darksand
+COPY . .
+
+# Real ROS2 bindings compile (stub tests still run without hardware).
+RUN . /opt/ros/humble/setup.sh \
+    && cargo check -p darksand-ros2 --features ros2 \
+    && cargo check -p darksand-btree --features ros2-live \
+    && cargo test -p darksand-ros2 -p darksand-btree --features darksand-btree/ros2

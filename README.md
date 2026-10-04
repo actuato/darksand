@@ -1,57 +1,70 @@
-# Darksand — standalone robotics stack
+# Darksand — governed execution for physical systems
 
-Extracted from `Igris` (`igris-runtime` + `igris-overture`) at commit
+Action → Run → Proof for robots: deterministic behavior-tree missions with a
+safety containment halt, signed run policy, and a fleet control plane.
+
+Extracted from `igris` (`igris-runtime` + `igris-overture`) at commit
 `7e6098ef9`, 2026-10-04, under owner authorization. Both repos are MIT
 licensed; original copyright headers are preserved in extracted files.
 
 ## Layout
 
-* `crates/` — buildable Rust workspace (default features, no ROS2 hardware):
-  * `igris-safety` — containment: `ViolationEventBus`, `ContainmentGuard`,
-    `RoboticsContext`, violation records (`src/violation.rs`, `src/event_bus.rs`)
-  * `igris-ros2` — ROS2 node (`r2r`, feature-gated), Nav2
-    (`navigate_to_pose`, `/navigate_to_pose`), `/cmd_vel` safety publisher,
-    `containment_bridge` (20ms Nav2 cancel + 3s zero-velocity loop)
-  * `igris-recovery` — Nav2 recovery: spin / backup / clear-costmap
-    (`ros2` feature is optional)
-  * `igris-fleet` — fleet agent: register / config-sync / telemetry upload
-    against `POST|GET /api/fleet/*`. `.igris/` key material was
-    deliberately NOT extracted — each deployment generates its own keys.
-  * `igris-swarm`, `igris-sensors`, `igris-simulation` — coordination,
-    GPIO/camera/lidar, `virtual_swarm|gazebo|isaac_sim` test envs
-* `reference/btree-ros/` — verbatim behavior-tree ROS nodes
-  (`RosTopicPublish`, `RosTopicSubscribe`, `RosServiceCall`) plus the full
-  BT source they were taken from. NOT a workspace member: the source tree
-  is missing its `core` module and `Cargo.toml` upstream
-  (`src/lib.rs:60` declares `pub mod core`, no `core/` dir exists), so it
-  cannot compile standalone until that gap is closed.
-* `reference/server-integration/ros2_integration.rs` — verbatim
-  `Ros2Manager` startup wiring. The `robotics-platform` dispatch branches
-  in igris `task_executor.rs` (~lines 1414, 4149–4319, 5410, 6826+) were
-  intentionally not duplicated (7k-line file); reimplement dispatch here
-  against `Ros2Node` instead of porting that file.
-* `policy/` — Go reference: robotics policy lifecycle API
-  (`routes_robotics_policy.go`), fleet push routes, audit export,
-  `fleet_crypto.go`, and SQL migrations `001,020,022,025,026,036–042`.
-  Requires the Overture harness (Fiber, Postgres, BetterAuth middleware)
-  to build; included as the contract to reimplement, not as a module.
-* `config/robotics.example.json5` — `ros2/sensors/swarm/fleet/simulation`
-  sections, all disabled by default.
-* `docs/*.mdx` — technical-preview docs, unchanged.
-* `.github/workflows/ros2-hil.yml` — hardware-in-loop CI (self-hosted
-  `ros2-hil` runner, `--features ros2`).
+* `crates/darksand-safety` — containment: `ViolationEventBus`,
+  `ContainmentGuard`, `RoboticsContext`, signed violation records.
+* `crates/darksand-ros2` — ROS2 node (`r2r`, feature-gated), Nav2
+  (`navigate_to_pose` → `/navigate_to_pose`), `/cmd_vel` safety publisher,
+  containment bridge (20ms Nav2 cancel + 3s zero-velocity loop).
+* `crates/darksand-btree` — deterministic mission core reconstructed
+  standalone (upstream was missing its `core` module): Sequence, Selector,
+  Parallel, Inverter, Repeat, Retry, Timeout, blackboard conditions, and
+  the ROS topic/service action nodes (`ros2` = stub, `ros2-live` = real
+  `r2r` bindings). Executor keeps max-ticks, deadline, cancel, and the
+  per-tick JSON observer. Deferred: LLM planners, mission-file parser,
+  WAL checkpoints, tool actions.
+* `crates/darksand-recovery` — Nav2 recovery behaviors (spin, backup,
+  clear-costmap) plus generic retry classification.
+* `crates/darksand-policy` — standalone policy service (SQLite, no
+  Overture/Clerk/Postgres): versioned robot-mode policies
+  (`supervised|active|disabled`), runtime allow-lists, Ed25519-signed
+  lifecycle commands with nonce replay protection, audit trail.
+  Run: `DARKSAND_POLICY_KEYS="tenant:key" cargo run -p darksand-policy`.
+* `crates/darksand-fleet` — fleet agent: register / config-sync / signed
+  telemetry upload. Reports real system stats (mock values only in
+  explicit `mock_mode`); `.igris/` key material is never committed.
+* `crates/darksand-swarm`, `darksand-sensors`, `darksand-simulation` —
+  coordination primitives, GPIO/camera/lidar, sim envs
+  (`virtual_swarm` implemented; `gazebo`/`isaac_sim` are config names only).
+* `reference/` — verbatim upstream sources not yet promoted: full BT tree
+  (`btree-ros/`), server `Ros2Manager` wiring, Go policy routes + SQL
+  migrations (`policy/`), preview docs.
+* `config/robotics.example.json5` — all sections disabled by default.
+* `docker/Dockerfile.ros2` — ROS Humble build + stub-test gate.
 
 ## Build
 
 ```sh
-cargo check --workspace   # stub ROS2, no hardware required
-cargo check -p igris-ros2 --features ros2   # needs ROS2 + r2r env
-cargo test --workspace
+cargo check --workspace && cargo test --workspace   # stub ROS2, no hardware
+cargo test -p darksand-btree --features ros2        # ROS nodes vs stub
+docker build -f docker/Dockerfile.ros2 .            # real r2r bindings
 ```
 
-## Safety invariants carried over
+## Roadmap
 
-Server-side authz, tenant-scoped state, deny-by-default outbound targets,
-no blind replay of uncertain effects, Ed25519-signed policy commands with
-nonce replay protection, no secrets in logs. Fleet private keys are never
-committed (see `.gitignore`: `.igris/`).
+* **Phase 0 — Repair (this branch):** fleet honesty fixes, standalone BT
+  core, standalone policy service, ROS2 Docker CI, `darksand-*` renames.
+* **Phase 1 — Single-robot MVP:** JSON mission files → BT + Nav2 under
+  containment, signed run receipts, Gazebo sim-in-loop.
+* **Phase 2 — Fleet control plane:** registration, config push, real
+  telemetry dashboards, policy governance per robot mode.
+* **Phase 3 — Swarm + HIL:** multi-host transport (today likely
+  in-memory — verify first), Isaac Sim, self-hosted HIL rig.
+
+Not building: LLM planners as product surface, marketplace, workflow
+builder, new protocols — frozen until Phase 1 ships.
+
+## Safety invariants
+
+Server-side authz (bearer tenants; all v1 key-holders are admin — see
+`darksand-policy` docs), tenant-scoped state, deny-by-default targets, no
+blind replay of uncertain effects, signed commands with 5-minute skew +
+nonce replay windows, no secrets in logs or git.
