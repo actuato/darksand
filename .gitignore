@@ -1,0 +1,6 @@
+/target
+/.igris
+.env
+.env.*
+*.log
+.DS_Store

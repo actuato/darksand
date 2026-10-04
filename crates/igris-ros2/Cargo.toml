@@ -1,0 +1,45 @@
+[package]
+name = "igris-ros2"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Core async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Containment integration
+igris-safety = { path = "../igris-safety" }
+
+# Unique IDs for navigation goals
+uuid = { workspace = true, features = ["v7"] }
+
+# Ed25519 signing for the containment bridge's supplementary violation records
+ed25519-dalek = { workspace = true }
+
+# ROS2 bindings - feature-gated for optional ROS2 support
+# Using r2r (Rust ROS2 client library) as it's stable on crates.io
+# Falls back to stub implementation when feature not enabled
+serde_derive = "1.0"
+
+[dependencies.r2r]
+version = "0.9"
+optional = true
+
+[features]
+default = []
+ros2 = ["r2r"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
