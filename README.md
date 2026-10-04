@@ -1,10 +1,10 @@
 # Darksand — governed execution for physical systems
 
-![license](https://img.shields.io/badge/license-MIT-lightgrey?style=flat)
-![rust](https://img.shields.io/badge/rust-1.75%2B-lightgrey?style=flat)
-![ros](https://img.shields.io/badge/ROS_2-Humble-lightgrey?style=flat)
-![platform](https://img.shields.io/badge/containment-linux-lightgrey?style=flat)
-![status](https://img.shields.io/badge/stage-technical_preview-lightgrey?style=flat)
+![license](https://img.shields.io/badge/license-MIT-blue?style=flat)
+![rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=flat&logo=rust)
+![ros](https://img.shields.io/badge/ROS_2-Humble-blue?style=flat&logo=ros)
+![platform](https://img.shields.io/badge/containment-linux-yellow?style=flat&logo=linux)
+![status](https://img.shields.io/badge/stage-technical_preview-orange?style=flat)
 
 **Action → Run → Proof for robots.** Deterministic behavior-tree missions run
 under a safety containment halt, governed by signed policy, with every run
