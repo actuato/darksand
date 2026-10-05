@@ -1,5 +1,6 @@
 /target
 .darksand/
+.igris/
 .env
 .env.*
 *.log

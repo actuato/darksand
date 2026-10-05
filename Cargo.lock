@@ -689,8 +689,19 @@ dependencies = [
  "darksand-ros2",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "darksand-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -727,17 +738,21 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "darksand-fleet",
  "ed25519-dalek",
  "hex",
  "rand 0.8.8",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "tower 0.4.13",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

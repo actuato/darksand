@@ -1,62 +1,65 @@
 // Robotics configuration for Darksand.
 // Derived from upstream config.json5 (commit 7e6098ef9), rebranded.
 // All sections default to disabled; enable per deployment.
+// Keys are quoted so the file parses as JSON once // comments are stripped
+// (see darksand-config::DarksandConfig::from_json5).
 {
   // ROS2 Integration
-  ros2: {
-    enabled: false,  // Enable ROS2 integration
-    node_name: "darksand_agent",  // ROS2 node name
-    namespace: "/darksand",  // ROS2 namespace
-    domain_id: 0,  // ROS2 DDS domain ID
-    enable_nav2: false,  // Enable Nav2 integration
-    nav2_action_server: "/navigate_to_pose",  // Nav2 action server
-    qos_reliability: 1,  // 0=best_effort, 1=reliable
-    qos_depth: 10  // QoS history depth
+  "ros2": {
+    "enabled": false,  // Enable ROS2 integration
+    "node_name": "darksand_agent",  // ROS2 node name
+    "namespace": "/darksand",  // ROS2 namespace
+    "domain_id": 0,  // ROS2 DDS domain ID
+    "enable_nav2": false,  // Enable Nav2 integration
+    "nav2_action_server": "/navigate_to_pose",  // Nav2 action server
+    "qos_reliability": 1,  // 0=best_effort, 1=reliable
+    "qos_depth": 10  // QoS history depth
   },
 
   // Sensors & Actuators
-  sensors: {
-    enable_gpio: false,  // Enable GPIO support (Raspberry Pi, etc.)
-    enable_camera: false,  // Enable camera capture
-    enable_lidar: false,  // Enable LIDAR scanning
-    camera_device: "/dev/video0",  // Camera device path
-    camera_width: 640,  // Camera resolution width
-    camera_height: 480,  // Camera resolution height
-    lidar_connection: "serial",  // LIDAR connection type (serial, udp, tcp)
-    lidar_address: "/dev/ttyUSB0",  // LIDAR device/address
-    gpio_output_whitelist: [],  // Whitelisted GPIO pins for output
-    actuator_whitelist: [],  // Whitelisted actuator actions
-    safety_mode: true  // Require confirmation for actuators
+  "sensors": {
+    "enabled": false,  // Master switch for sensors & actuators
+    "enable_gpio": false,  // Enable GPIO support (Raspberry Pi, etc.)
+    "enable_camera": false,  // Enable camera capture
+    "enable_lidar": false,  // Enable LIDAR scanning
+    "camera_device": "/dev/video0",  // Camera device path
+    "camera_width": 640,  // Camera resolution width
+    "camera_height": 480,  // Camera resolution height
+    "lidar_connection": "serial",  // LIDAR connection type (serial, udp, tcp)
+    "lidar_address": "/dev/ttyUSB0",  // LIDAR device/address
+    "gpio_output_whitelist": [],  // Whitelisted GPIO pins for output
+    "actuator_whitelist": [],  // Whitelisted actuator actions
+    "safety_mode": true  // Require confirmation for actuators
   },
 
   // Swarm Coordination
-  swarm: {
-    enabled: false,  // Enable swarm coordination
-    election_timeout_secs: [5, 10],  // Election timeout range (min, max)
-    heartbeat_interval_secs: 2,  // Heartbeat interval
-    max_agents: 100,  // Maximum agents in swarm
-    enable_conflict_resolution: true,  // Enable conflict resolution
-    conflict_strategy: "voting"  // Strategy: leader_decides, voting, priority, consensus
+  "swarm": {
+    "enabled": false,  // Enable swarm coordination
+    "election_timeout_secs": [5, 10],  // Election timeout range (min, max)
+    "heartbeat_interval_secs": 2,  // Heartbeat interval
+    "max_agents": 100,  // Maximum agents in swarm
+    "enable_conflict_resolution": true,  // Enable conflict resolution
+    "conflict_strategy": "voting"  // Strategy: leader_decides, voting, priority, consensus
   },
 
   // Fleet Management
-  fleet: {
-    enabled: false,  // Enable fleet management
-    darksand_endpoint: "https://darksand.example.com",  // Darksand endpoint URL
-    agent_id: null,  // Agent ID (auto-generated if null)
-    api_key_env: "FLEET_API_KEY",  // Fleet API key environment variable
-    enable_tls: true,  // Enable TLS for secure communication
-    sync_interval_secs: 300,  // Config sync interval (5 minutes)
-    auto_sync_config: true,  // Auto-sync configuration
-    enable_telemetry: true,  // Enable telemetry upload
-    telemetry_interval_secs: 60  // Telemetry upload interval (1 minute)
+  "fleet": {
+    "enabled": false,  // Enable fleet management
+    "darksand_endpoint": "https://darksand.example.com",  // Darksand endpoint URL
+    "agent_id": null,  // Agent ID (auto-generated if null)
+    "api_key_env": "FLEET_API_KEY",  // Fleet API key environment variable
+    "enable_tls": true,  // Enable TLS for secure communication
+    "sync_interval_secs": 300,  // Config sync interval (5 minutes)
+    "auto_sync_config": true,  // Auto-sync configuration
+    "enable_telemetry": true,  // Enable telemetry upload
+    "telemetry_interval_secs": 60  // Telemetry upload interval (1 minute)
   },
 
   // Simulation & Testing
-  simulation: {
-    enabled: false,  // Enable simulation mode
-    env_type: "virtual_swarm",  // Environment: virtual_swarm, gazebo, isaac_sim
-    chaos_enabled: false,  // Enable chaos injection
-    failure_rate: 0.1  // Chaos failure rate (10%)
+  "simulation": {
+    "enabled": false,  // Enable simulation mode
+    "env_type": "virtual_swarm",  // Environment: virtual_swarm, gazebo, isaac_sim
+    "chaos_enabled": false,  // Enable chaos injection
+    "failure_rate": 0.1  // Chaos failure rate (10%)
   }
 }

@@ -90,6 +90,14 @@ impl Default for SensorConfig {
     }
 }
 
+/// Where a sensor reading came from. Synthetic data must never be mistaken
+/// for hardware truth downstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DataSource {
+    Synthetic,
+    Hardware,
+}
+
 /// Camera frame data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CameraFrame {
@@ -98,6 +106,8 @@ pub struct CameraFrame {
     pub height: u32,
     pub format: String,
     pub data: Vec<u8>,
+    /// Always [`DataSource::Synthetic`] until a V4L2 backend exists.
+    pub origin: DataSource,
 }
 
 impl CameraFrame {
@@ -114,6 +124,8 @@ pub struct LidarScan {
     pub timestamp: u64,
     pub points: Vec<LidarPoint>,
     pub scan_rate_hz: f32,
+    /// Always [`DataSource::Synthetic`] until a serial/UDP backend exists.
+    pub origin: DataSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +142,127 @@ pub enum PinState {
     High = 1,
 }
 
+/// Destination of an actuation command.
+///
+/// The contract is strict: success is only ever reported alongside an effect
+/// (a recorded sim command or a hardware acknowledgement). A backend that
+/// cannot act MUST return `Err` — a fabricated `Ok(())` is how robots drive
+/// off tables in testing.
+pub trait ActuatorBackend: Send + Sync {
+    fn apply(&self, action: &str, params: &serde_json::Value) -> Result<ActuationRecord>;
+    fn name(&self) -> &str;
+}
+
+/// Proof that a command reached a backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActuationRecord {
+    pub backend: String,
+    pub action: String,
+    pub params: serde_json::Value,
+    pub applied_at_ms: u64,
+}
+
+/// No hardware attached: every command fails honestly.
+pub struct NoHardwareBackend;
+
+impl ActuatorBackend for NoHardwareBackend {
+    fn apply(&self, action: &str, _params: &serde_json::Value) -> Result<ActuationRecord> {
+        Err(anyhow::anyhow!(
+            "no actuator hardware attached: cannot execute '{action}'"
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "no-hardware"
+    }
+}
+
+/// In-memory backend for simulation and tests: records every command.
+pub struct SimActuatorBackend {
+    log: std::sync::Mutex<Vec<ActuationRecord>>,
+}
+
+impl SimActuatorBackend {
+    pub fn new() -> Self {
+        Self {
+            log: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn commands(&self) -> Vec<ActuationRecord> {
+        self.log.lock().unwrap().clone()
+    }
+}
+
+impl Default for SimActuatorBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ActuatorBackend for SimActuatorBackend {
+    fn apply(&self, action: &str, params: &serde_json::Value) -> Result<ActuationRecord> {
+        let record = ActuationRecord {
+            backend: self.name().to_string(),
+            action: action.to_string(),
+            params: params.clone(),
+            applied_at_ms: now_ms(),
+        };
+        self.log.lock().unwrap().push(record.clone());
+        Ok(record)
+    }
+
+    fn name(&self) -> &str {
+        "sim"
+    }
+}
+
+/// A prepared (not yet executed) actuation. Single-use: confirmation consumes
+/// the token, and expired tokens are rejected, so replays fail closed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingActuation {
+    pub token: u64,
+    pub action: String,
+    pub params: serde_json::Value,
+    pub expires_at_ms: u64,
+}
+
+/// Confirmation window for a prepared actuation.
+pub const CONFIRM_TTL_MS: u64 = 60_000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Contact phase for one force/torque sample. Contact-rich transfer fails
+/// first on missing contact observability, so the phase travels with the
+/// data even though no backend produces it yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContactPhase {
+    NonContact,
+    PreContact,
+    Contact,
+}
+
+/// One force/torque sample with contact phase.
+///
+/// Schema-only today: every backend returns synthetic data or nothing, so
+/// there is deliberately NO `read_force` on `SensorManager` yet — adding the
+/// reader without a real sensor would fabricate contact data, the exact
+/// failure this schema exists to prevent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForceSample {
+    pub timestamp: u64,
+    /// Newtons in the sensor frame.
+    pub force_n: [f32; 3],
+    /// Newton-meters in the sensor frame.
+    pub torque_nm: [f32; 3],
+    pub phase: ContactPhase,
+}
+
 /// Sensor Manager
 pub struct SensorManager {
     config: SensorConfig,
@@ -142,6 +275,14 @@ pub struct SensorManager {
 
     // LIDAR state
     lidar_active: Arc<RwLock<bool>>,
+
+    // Pending two-phase actuations (token -> request)
+    pending: Arc<RwLock<std::collections::HashMap<u64, PendingActuation>>>,
+    next_token: Arc<std::sync::atomic::AtomicU64>,
+
+    // Where confirmed commands go. Defaults to [`NoHardwareBackend`]:
+    // without hardware, actuation fails instead of pretending.
+    backend: Arc<RwLock<Arc<dyn ActuatorBackend>>>,
 }
 
 impl SensorManager {
@@ -154,6 +295,9 @@ impl SensorManager {
             gpio_state: Arc::new(RwLock::new(std::collections::HashMap::new())),
             camera_active: Arc::new(RwLock::new(false)),
             lidar_active: Arc::new(RwLock::new(false)),
+            pending: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            next_token: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            backend: Arc::new(RwLock::new(Arc::new(NoHardwareBackend) as Arc<dyn ActuatorBackend>)),
         };
 
         // Initialize GPIO if enabled
@@ -310,6 +454,7 @@ impl SensorManager {
             height,
             format: "RGB8".to_string(),
             data,
+            origin: DataSource::Synthetic,
         })
     }
 
@@ -357,6 +502,7 @@ impl SensorManager {
                 .as_millis() as u64,
             points,
             scan_rate_hz: 10.0,
+            origin: DataSource::Synthetic,
         })
     }
 
@@ -380,7 +526,13 @@ impl SensorManager {
     }
 
     /// Execute actuator action (with safety checks)
-    pub async fn execute_actuator(&self, action: &str, params: serde_json::Value) -> Result<()> {
+    ///
+    /// Legacy single call: with `safety_mode` on this always fails (use
+    /// [`Self::prepare_actuation`] + [`Self::confirm_actuation`] instead);
+    /// with it off the command goes to the attached backend — which fails
+    /// honestly when no hardware is attached instead of reporting a
+    /// fabricated `Ok(())`.
+    pub async fn execute_actuator(&self, action: &str, params: serde_json::Value) -> Result<ActuationRecord> {
         // Check whitelist
         if !self.config.actuator_whitelist.contains(action) {
             return Err(anyhow::anyhow!(
@@ -394,8 +546,9 @@ impl SensorManager {
                 "Actuator action '{}' requires confirmation (safety mode enabled)",
                 action
             );
-            // In production, this would request human confirmation
-            return Err(anyhow::anyhow!("Actuator action blocked by safety mode"));
+            return Err(anyhow::anyhow!(
+                "Actuator action blocked by safety mode: prepare then confirm"
+            ));
         }
 
         info!(
@@ -403,12 +556,56 @@ impl SensorManager {
             action, params
         );
 
-        // In production, this would:
-        // 1. Validate action and parameters
-        // 2. Send commands to motor controllers
-        // 3. Monitor execution
+        let backend = self.backend.read().await.clone();
+        backend.apply(action, &params)
+    }
 
-        Ok(())
+    /// Attach the backend confirmed commands are applied to (default:
+    /// [`NoHardwareBackend`]).
+    pub async fn set_backend(&self, backend: Arc<dyn ActuatorBackend>) {
+        *self.backend.write().await = backend;
+    }
+
+    /// Phase one of confirmed actuation: whitelist-check `action` and mint a
+    /// single-use token valid for [`CONFIRM_TTL_MS`]. Nothing moves yet.
+    pub async fn prepare_actuation(
+        &self,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<PendingActuation> {
+        if !self.config.actuator_whitelist.contains(action) {
+            return Err(anyhow::anyhow!(
+                "Actuator action '{}' not in whitelist",
+                action
+            ));
+        }
+        let token = self
+            .next_token
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pending = PendingActuation {
+            token,
+            action: action.to_string(),
+            params,
+            expires_at_ms: now_ms().saturating_add(CONFIRM_TTL_MS),
+        };
+        self.pending.write().await.insert(token, pending.clone());
+        Ok(pending)
+    }
+
+    /// Phase two: consume `token` and apply the command to the backend.
+    /// Unknown, already-consumed, or expired tokens fail closed.
+    pub async fn confirm_actuation(&self, token: u64) -> Result<ActuationRecord> {
+        let pending = self
+            .pending
+            .write()
+            .await
+            .remove(&token)
+            .ok_or_else(|| anyhow::anyhow!("unknown or already-consumed actuation token"))?;
+        if now_ms() > pending.expires_at_ms {
+            return Err(anyhow::anyhow!("actuation token expired"));
+        }
+        let backend = self.backend.read().await.clone();
+        backend.apply(&pending.action, &pending.params)
     }
 
     /// Shutdown sensor manager
@@ -495,5 +692,94 @@ mod tests {
             .execute_actuator("move_forward", serde_json::json!({"speed": 0.5}))
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn actuator_confirmation_flow() {
+        let mut config = SensorConfig::default();
+        config.safety_mode = true;
+        config.actuator_whitelist.insert("move".to_string());
+        let manager = SensorManager::new(config).await.unwrap();
+        let backend = Arc::new(SimActuatorBackend::new());
+        manager
+            .set_backend(backend.clone() as Arc<dyn ActuatorBackend>)
+            .await;
+
+        // No token: refused even though whitelisted.
+        assert!(manager
+            .execute_actuator("move", serde_json::json!({}))
+            .await
+            .is_err());
+
+        // Prepare then confirm: exactly one recorded effect.
+        let pending = manager
+            .prepare_actuation("move", serde_json::json!({"v": 1}))
+            .await
+            .unwrap();
+        let outcome = manager.confirm_actuation(pending.token).await.unwrap();
+        assert_eq!(outcome.action, "move");
+        assert_eq!(backend.commands().len(), 1);
+
+        // Same token replayed: consumed already.
+        assert!(manager.confirm_actuation(pending.token).await.is_err());
+        assert_eq!(backend.commands().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_token_rejected() {
+        let mut config = SensorConfig::default();
+        config.actuator_whitelist.insert("move".to_string());
+        let manager = SensorManager::new(config).await.unwrap();
+        let pending = manager
+            .prepare_actuation("move", serde_json::json!({}))
+            .await
+            .unwrap();
+        // Backdate the stored request past its TTL.
+        {
+            let mut map = manager.pending.write().await;
+            let entry = map.get_mut(&pending.token).unwrap();
+            entry.expires_at_ms = entry.expires_at_ms.saturating_sub(CONFIRM_TTL_MS + 1);
+        }
+        assert!(manager.confirm_actuation(pending.token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn safety_off_without_hardware_fails_honestly() {
+        let mut config = SensorConfig::default();
+        config.safety_mode = false;
+        config.actuator_whitelist.insert("move".to_string());
+        let manager = SensorManager::new(config).await.unwrap();
+        // The old code returned Ok(()) here having touched nothing.
+        assert!(manager
+            .execute_actuator("move", serde_json::json!({}))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn synthetic_origin_is_labeled() {
+        let mut config = SensorConfig::default();
+        config.enable_camera = true;
+        config.enable_lidar = true;
+        let manager = SensorManager::new(config).await.unwrap();
+        // Camera/lidar need init flags; enable them directly for the test.
+        *manager.camera_active.write().await = true;
+        *manager.lidar_active.write().await = true;
+        assert_eq!(manager.read_camera().await.unwrap().origin, DataSource::Synthetic);
+        assert_eq!(manager.read_lidar().await.unwrap().origin, DataSource::Synthetic);
+    }
+
+    #[test]
+    fn force_sample_schema_roundtrips() {
+        let sample = ForceSample {
+            timestamp: 1,
+            force_n: [0.0, 0.0, -9.81],
+            torque_nm: [0.0, 0.0, 0.0],
+            phase: ContactPhase::Contact,
+        };
+        let back: ForceSample =
+            serde_json::from_str(&serde_json::to_string(&sample).unwrap()).unwrap();
+        assert_eq!(back.phase, ContactPhase::Contact);
+        assert_eq!(back.force_n[2], -9.81);
     }
 }

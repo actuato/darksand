@@ -24,9 +24,9 @@ on:
         required: true
         default: "42"
       test_filter:
-        description: "Cargo test filter for ROS2 HIL coverage"
+        description: "Cargo test filter for ROS2 HIL coverage (must match >=1 test; the gate fails on zero matches)"
         required: true
-        default: "runtime_task_signed_ros2"
+        default: "containment_bridge"
 
 jobs:
   ros2-hil:
@@ -62,12 +62,16 @@ jobs:
         run: |
           set -euo pipefail
           source "/opt/ros/${{ inputs.ros_distro }}/setup.bash"
-          cargo test \
+          # A filter matching zero tests exits 0 in cargo — fail the gate
+          # explicitly so HIL can never go green running nothing.
+          output=$(cargo test \
             --manifest-path Cargo.toml \
             -p darksand-ros2 -p darksand-btree \
             --features darksand-btree/ros2 \
             '${{ inputs.test_filter }}' \
-            -- --nocapture
+            -- --nocapture 2>&1 | tee /dev/stderr)
+          echo "$output" | grep -qE "test result: ok\. [1-9][0-9]* passed" \
+            || { echo "HIL GATE FAILED: filter matched zero passing tests"; exit 1; }
 
       - name: Upload ROS2 audit artifacts
         if: always()

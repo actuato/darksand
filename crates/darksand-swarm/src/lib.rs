@@ -34,15 +34,17 @@ pub mod message_signing;
 pub mod task_executor;
 pub mod transport;
 
-pub use message_signing::{verify_envelope, SignedSwarmEnvelope, SwarmMessageSigner};
+pub use message_signing::{
+    verify_envelope, verify_envelope_fresh, PeerKeyRegistry, SignedSwarmEnvelope, SwarmMessageSigner,
+};
 pub use task_executor::{
     HealthCheckHandler, InferenceTaskHandler, TaskExecutionResult, TaskExecutor, TaskHandler,
 };
 pub use transport::{SwarmBus, SwarmMessage, SwarmTransport, SwarmTransportHandle};
 
 use anyhow::Result;
-use rand::Rng;
-use serde::{Deserialize, Serialize};
+use crate::transport::SwarmTransport as _;
+use rand::Rng;use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -295,6 +297,40 @@ impl SwarmCoordinator {
         Ok(())
     }
 
+    /// One election-monitor step, factored out so it is testable without
+    /// sleeping through randomized timeouts. Returns `true` when it
+    /// escalated (Follower→Candidate, or Candidate→new election).
+    ///
+    /// The spawned [`Self::start_election_monitor`] loop calls the same
+    /// transition every second; this is the whole state machine, the loop
+    /// is just a timer around it.
+    pub async fn tick_election(&self) -> Result<bool> {
+        let elapsed = SystemTime::now()
+            .duration_since(*self.last_heartbeat_received.read().await)
+            .unwrap_or_default();
+        if elapsed <= Duration::from_secs(self.config.election_timeout_secs.0) {
+            return Ok(false);
+        }
+        // Re-arm the timer first: the next escalation is a full timeout away,
+        // so terms advance once per timeout, not once per monitor tick.
+        *self.last_heartbeat_received.write().await = SystemTime::now();
+        let role = *self.current_role.read().await;
+        match role {
+            AgentRole::Follower => {
+                warn!("Election timeout - becoming candidate");
+                *self.current_role.write().await = AgentRole::Candidate;
+                Ok(true)
+            }
+            AgentRole::Candidate => {
+                // Re-arm: new term, self-vote, and re-check the majority so
+                // a lone agent (or a partition of one) still converges.
+                self.start_election().await?;
+                Ok(true)
+            }
+            AgentRole::Leader => Ok(false),
+        }
+    }
+
     /// Start an election (Raft-style with vote counting)
     pub async fn start_election(&self) -> Result<()> {
         info!("Starting leader election");
@@ -462,6 +498,32 @@ impl SwarmCoordinator {
         }
 
         debug!("Leader sending heartbeat");
+        Ok(())
+    }
+
+    /// Broadcast a heartbeat over `transport` (leader only) and refresh the
+    /// leader's own heartbeat clock so it never considers itself stale.
+    ///
+    /// This is the real send path; [`Self::send_heartbeat`] only asserts
+    /// leadership without a transport to speak on.
+    pub async fn broadcast_heartbeat(
+        &self,
+        transport: &impl SwarmTransport,
+    ) -> Result<()> {
+        let (role, term) = (
+            *self.current_role.read().await,
+            *self.current_term.read().await,
+        );
+        if role != AgentRole::Leader {
+            return Err(anyhow::anyhow!("Only leader can send heartbeats"));
+        }
+        transport
+            .broadcast(SwarmMessage::Heartbeat {
+                leader_id: self.agent_id.clone(),
+                term,
+            })
+            .await?;
+        *self.last_heartbeat_received.write().await = SystemTime::now();
         Ok(())
     }
 
@@ -636,8 +698,14 @@ impl SwarmCoordinator {
         let timeout = self.config.stale_agent_timeout_secs;
         let mut agents = self.agents.write().await;
         let mut removed = Vec::new();
+        let this = self.agent_id.clone();
 
         agents.retain(|id, info| {
+            // The coordinator is always fresh to itself: evicting our own
+            // entry would orphan our leadership and our votes.
+            if id == &this {
+                return true;
+            }
             if now.saturating_sub(info.last_heartbeat) > timeout {
                 warn!(
                     "Removing stale agent: {} (last seen {}s ago)",
@@ -771,6 +839,24 @@ impl SwarmCoordinator {
                 Ok(None)
             }
         }
+    }
+
+    /// Process a signed envelope: verify (peer key, signature, freshness,
+    /// replay) through `registry`, then handle the inner message.
+    ///
+    /// This is the ingress every transport MUST use. `process_message`
+    /// remains for already-trusted (e.g. loopback/test) traffic.
+    pub async fn process_envelope(
+        &self,
+        envelope: &crate::message_signing::SignedSwarmEnvelope,
+        registry: &mut crate::message_signing::PeerKeyRegistry,
+    ) -> Result<Option<SwarmMessage>> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let message = registry.verify(envelope, now)?;
+        self.process_message(message).await
     }
 }
 
@@ -1022,5 +1108,156 @@ mod tests {
         coordinator.join_swarm("agent-1").await.unwrap();
         coordinator.join_swarm("agent-2").await.unwrap();
         assert!(coordinator.join_swarm("agent-3").await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod ingress_tests {
+    use super::*;
+    use crate::message_signing::{PeerKeyRegistry, SwarmMessageSigner};
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    fn test_config() -> SwarmConfig {
+        SwarmConfig {
+            election_timeout_secs: (0, 0),
+            stale_agent_timeout_secs: 30,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn envelope_roundtrip_and_drop_policy() {
+        let coord = SwarmCoordinator::with_id(test_config(), "node-2").await.unwrap();
+        let sk1 = SigningKey::generate(&mut OsRng);
+        let sk2 = SigningKey::generate(&mut OsRng);
+        let mut registry = PeerKeyRegistry::new(60);
+        registry.register_peer("node-1", sk1.verifying_key());
+        registry.register_peer("node-2", sk2.verifying_key());
+
+        // Valid heartbeat from a known peer is processed: leader recorded.
+        let signer = SwarmMessageSigner::new("node-1", sk1);
+        let env = signer
+            .sign(SwarmMessage::Heartbeat {
+                leader_id: "node-1".to_string(),
+                term: 7,
+            })
+            .unwrap();
+        coord.process_envelope(&env, &mut registry).await.unwrap();
+        assert_eq!(coord.get_leader_id().await.as_deref(), Some("node-1"));
+
+        // Exact redelivery is a replay: rejected, state untouched.
+        assert!(coord.process_envelope(&env, &mut registry).await.is_err());
+
+        // Unknown peer: rejected before any crypto.
+        let stranger = SigningKey::generate(&mut OsRng);
+        let senv = SwarmMessageSigner::new("node-9", stranger)
+            .sign(SwarmMessage::Heartbeat {
+                leader_id: "node-9".to_string(),
+                term: 1,
+            })
+            .unwrap();
+        assert!(coord.process_envelope(&senv, &mut registry).await.is_err());
+
+        // Tampered content: signature no longer matches.
+        let mut tampered = signer
+            .sign(SwarmMessage::Heartbeat {
+                leader_id: "node-1".to_string(),
+                term: 8,
+            })
+            .unwrap();
+        tampered.message = SwarmMessage::Heartbeat {
+            leader_id: "node-1".to_string(),
+            term: 999,
+        };
+        assert!(coord.process_envelope(&tampered, &mut registry).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn leader_recovers_after_timeout() {
+        let coord = SwarmCoordinator::with_id(test_config(), "solo").await.unwrap();
+        coord.start_election().await.unwrap();
+        assert_eq!(coord.get_role().await, AgentRole::Leader);
+        let term1 = coord.get_term().await;
+
+        // Leader steps down (partition heals with a higher term elsewhere).
+        *coord.current_role.write().await = AgentRole::Follower;
+        *coord.leader_id.write().await = None;
+        *coord.last_heartbeat_received.write().await = SystemTime::now()
+            .checked_sub(Duration::from_secs(5))
+            .unwrap();
+
+        // First escalation: Follower → Candidate.
+        assert!(coord.tick_election().await.unwrap());
+        assert_eq!(coord.get_role().await, AgentRole::Candidate);
+        // Once the timer lapses again, the candidate re-runs the election and,
+        // alone, converges back to Leader with a strictly greater term.
+        *coord.last_heartbeat_received.write().await = SystemTime::now()
+            .checked_sub(Duration::from_secs(5))
+            .unwrap();
+        assert!(coord.tick_election().await.unwrap());
+        assert_eq!(coord.get_role().await, AgentRole::Leader);
+        assert!(coord.get_term().await > term1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_never_evicts_self() {        let coord = SwarmCoordinator::with_id(test_config(), "me").await.unwrap();
+        coord.join_swarm("me").await.unwrap();
+        coord.join_swarm("peer").await.unwrap();
+        // Backdate everything, including ourselves.
+        {
+            let mut agents = coord.agents.write().await;
+            for info in agents.values_mut() {
+                info.last_heartbeat = info.last_heartbeat.saturating_sub(10_000);
+            }
+        }
+        let removed = coord.cleanup_stale_agents().await;
+        assert_eq!(removed, vec!["peer".to_string()]);
+        assert!(coord.agents.read().await.contains_key("me"));
+    }
+
+    #[tokio::test]
+    async fn broadcast_heartbeat_reaches_peers() {
+        use crate::transport::SwarmBus;
+
+        let bus = SwarmBus::new();
+        let leader_tx = bus.create_transport("leader", 16).await;
+        let follower_tx = bus.create_transport("follower", 16).await;
+        let mut follower_inbox = SwarmTransportHandle::from_transport(follower_tx);
+
+        let coord = SwarmCoordinator::with_id(test_config(), "leader").await.unwrap();
+        coord.start_election().await.unwrap();
+        assert_eq!(coord.get_role().await, AgentRole::Leader);
+
+        coord.broadcast_heartbeat(&leader_tx).await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(2), follower_inbox.recv()).await {
+            Ok(Some(SwarmMessage::Heartbeat { leader_id, .. })) => {
+                assert_eq!(leader_id, "leader")
+            }
+            other => panic!("expected heartbeat, got {other:?}"),
+        }
+
+        // Non-leaders cannot broadcast.
+        let follower = SwarmCoordinator::with_id(test_config(), "follower").await.unwrap();
+        assert!(follower.broadcast_heartbeat(&leader_tx).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn election_timer_rearms_after_escalation() {
+        let config = SwarmConfig {
+            election_timeout_secs: (3600, 3600),
+            ..Default::default()
+        };
+        let coord = SwarmCoordinator::with_id(config, "n").await.unwrap();
+        *coord.last_heartbeat_received.write().await = SystemTime::now()
+            .checked_sub(Duration::from_secs(4000))
+            .unwrap();
+        let term0 = coord.get_term().await;
+        assert!(coord.tick_election().await.unwrap());
+        assert_eq!(coord.get_role().await, AgentRole::Candidate);
+        // Timer re-armed: immediate ticks escalate nothing and bump no terms.
+        assert!(!coord.tick_election().await.unwrap());
+        assert!(!coord.tick_election().await.unwrap());
+        assert_eq!(coord.get_term().await, term0);
     }
 }

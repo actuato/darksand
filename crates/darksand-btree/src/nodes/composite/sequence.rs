@@ -262,3 +262,17 @@ mod tests {
         assert_eq!(seq.current_child, 0);
     }
 }
+
+#[cfg(test)]
+mod empty_tests {
+    use super::*;
+    use crate::core::BTreeContext;
+
+    /// Vacuous truth, documented: an empty Sequence succeeds.
+    #[tokio::test]
+    async fn empty_sequence_succeeds() {
+        let mut seq = Sequence::new("empty");
+        let mut ctx = BTreeContext::new();
+        assert_eq!(seq.tick(&mut ctx).await.unwrap(), NodeStatus::Success);
+    }
+}

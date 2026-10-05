@@ -748,12 +748,21 @@ impl Ros2Node {
     }
 
     /// Cancel current navigation goal (legacy API - prefer NavigationHandle::cancel())
+    ///
+    /// Cancels the live goal handle first (the actual Nav2 cancel), then
+    /// marks the legacy status. Previously this only rewrote the status
+    /// struct while the robot kept driving.
     pub async fn cancel_navigation(&self) -> Result<()> {
         if !self.config.enable_nav2 {
             return Err(anyhow::anyhow!("Nav2 is disabled"));
         }
 
         info!("Canceling navigation goal");
+
+        if let Some(handle) = self.get_active_handle().await {
+            // Already-terminal goals report an error; that state is the goal.
+            let _ = handle.cancel().await;
+        }
 
         let mut status = self.nav_status.write().await;
         if let Some(nav_status) = status.as_mut() {
@@ -770,6 +779,10 @@ impl Ros2Node {
     }
 
     /// Get the last known robot velocity [linear_x_m_s, angular_z_rad_s].
+    ///
+    /// Synthetic unless an odometry subscriber feeds it: the stub sets this
+    /// from simulated motion/publishes only. Do not treat violation-record
+    /// velocity as sensed truth on hardware without wiring `/odom` in.
     pub async fn last_velocity(&self) -> [f64; 2] {
         *self.last_velocity.read().await
     }
@@ -1032,12 +1045,19 @@ impl Ros2Node {
     }
 
     /// Cancel current navigation goal (stub, legacy API - prefer NavigationHandle::cancel())
+    ///
+    /// Cancels the live goal handle first (the actual cancel), then marks
+    /// the legacy status.
     pub async fn cancel_navigation(&self) -> Result<()> {
         if !self.config.enable_nav2 {
             return Err(anyhow::anyhow!("Nav2 is disabled"));
         }
 
         info!("Canceling navigation goal (stub)");
+
+        if let Some(handle) = self.get_active_handle().await {
+            let _ = handle.cancel().await;
+        }
 
         let mut status = self.nav_status.write().await;
         if let Some(nav_status) = status.as_mut() {
@@ -1054,6 +1074,9 @@ impl Ros2Node {
     }
 
     /// Get the last known robot velocity [linear_x_m_s, angular_z_rad_s].
+    ///
+    /// Stub synthetic value from simulated motion/publishes only — see the
+    /// live implementation's note about wiring `/odom` on hardware.
     pub async fn last_velocity(&self) -> [f64; 2] {
         *self.last_velocity.read().await
     }
@@ -1101,7 +1124,14 @@ impl Ros2Node {
     }
 
     /// Publish an arbitrary velocity command (stub — logs [linear_x, angular_z]).
+    ///
+    /// Applies the same safety envelope as the live publisher (linear
+    /// ±2 m/s, angular ±π rad/s) so stub tests exercise the exact values
+    /// hardware would see — an unclamped value must never pass stub review
+    /// and then behave differently on the robot.
     pub async fn publish_velocity(&self, linear_x: f64, angular_z: f64) -> Result<()> {
+        let linear_x = linear_x.clamp(-2.0, 2.0);
+        let angular_z = angular_z.clamp(-std::f64::consts::PI, std::f64::consts::PI);
         debug!(
             "Publishing velocity (stub) linear_x={:.3} angular_z={:.3}",
             linear_x, angular_z
@@ -1468,6 +1498,49 @@ mod tests {
 
         handle.cancel_with_timeout(50).await.unwrap();
         assert_eq!(handle.wait().await.unwrap(), NavigationState::Canceled);
+    }
+
+    #[tokio::test]
+    async fn legacy_cancel_navigation_cancels_live_goal() {        let config = Ros2Config {
+            enabled: true,
+            enable_nav2: true,
+            ..Default::default()
+        };
+        let node = Ros2Node::new(config).await.unwrap();
+        let handle = node
+            .navigate_to_pose(NavigationGoal {
+                x: 12.0,
+                y: 1.0,
+                z: 0.0,
+                orientation_w: 1.0,
+                frame_id: "map".to_string(),
+            })
+            .await
+            .unwrap();
+
+        node.cancel_navigation().await.unwrap();
+
+        // The live handle — not just the legacy status struct — is canceled.
+        assert_eq!(handle.status().await, NavigationState::Canceled);
+        let status = node.get_navigation_status().await.unwrap().unwrap();
+        assert_eq!(status.status, "canceled");
+        assert_eq!(status.state, NavigationState::Canceled);
+    }
+
+    #[tokio::test]
+    async fn stub_velocity_publisher_matches_live_envelope() {
+        let config = Ros2Config {
+            enabled: true,
+            ..Default::default()
+        };
+        let node = Ros2Node::new(config).await.unwrap();
+
+        node.publish_velocity(100.0, 100.0).await.unwrap();
+        assert_eq!(node.last_velocity().await, [2.0, std::f64::consts::PI]);
+        node.publish_velocity(-100.0, -100.0).await.unwrap();
+        assert_eq!(node.last_velocity().await, [-2.0, -std::f64::consts::PI]);
+        node.publish_spin_velocity(10.0).await.unwrap();
+        assert_eq!(node.last_velocity().await[1], std::f64::consts::PI);
     }
 
     #[tokio::test]

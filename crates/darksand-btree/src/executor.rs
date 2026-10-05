@@ -26,6 +26,11 @@ pub struct ExecutorConfig {
 
     /// Delay between ticks (for rate limiting)
     pub tick_delay: Option<Duration>,
+
+    /// Tick number the next run starts from. Restarts and resumed runs set
+    /// this from the WAL so journaled tick sequences stay monotonic
+    /// (`[1, 2, 3]`, never `[1, 1, 2]`). Defaults to 0 (first run).
+    pub start_tick: u64,
 }
 
 impl Default for ExecutorConfig {
@@ -35,6 +40,7 @@ impl Default for ExecutorConfig {
             deadline: None,
             enable_tracing: false,
             tick_delay: None,
+            start_tick: 0,
         }
     }
 }
@@ -49,6 +55,9 @@ pub struct BTreeExecutor {
     /// Optional WAL path: one [`crate::wal::WalEntry`] appended per tick.
     /// Best-effort (warn on failure, never fail the mission for the journal).
     wal_path: Option<String>,
+    /// Optional mission identity stamped into each WAL entry so resume can
+    /// refuse a journal from a different mission document.
+    mission_identity: Option<(String, String)>,
 }
 
 impl BTreeExecutor {
@@ -58,6 +67,7 @@ impl BTreeExecutor {
             config: ExecutorConfig::default(),
             tick_observer: None,
             wal_path: None,
+            mission_identity: None,
         }
     }
 
@@ -67,6 +77,7 @@ impl BTreeExecutor {
             config,
             tick_observer: None,
             wal_path: None,
+            mission_identity: None,
         }
     }
 
@@ -108,6 +119,26 @@ impl BTreeExecutor {
         self
     }
 
+    /// Start tick numbering from `n` (builder pattern). Resumed runs pass the
+    /// WAL's last tick so the journal stays monotonic across restarts.
+    pub fn with_start_tick(mut self, n: u64) -> Self {
+        self.config.start_tick = n;
+        self
+    }
+
+    /// Stamp WAL entries with the mission document's identity (builder pattern).
+    ///
+    /// Pass the mission `name` and `mission_hash(document)`; resume refuses
+    /// journals from a different document instead of injecting stale state.
+    pub fn with_mission_identity(
+        mut self,
+        name: impl Into<String>,
+        hash: impl Into<String>,
+    ) -> Self {
+        self.mission_identity = Some((name.into(), hash.into()));
+        self
+    }
+
     /// Execute a behavior tree until completion or limits reached.
     pub async fn execute(
         &self,
@@ -129,7 +160,7 @@ impl BTreeExecutor {
         mut cancel_rx: watch::Receiver<bool>,
     ) -> Result<ExecutionResult> {
         let start_time = Instant::now();
-        let mut tick_count = 0u64;
+        let mut tick_count = self.config.start_tick;
 
         if self.config.enable_tracing {
             info!(
@@ -203,7 +234,9 @@ impl BTreeExecutor {
             }
 
             if let Some(ref tx) = self.tick_observer {
-                let tree_json = tree.to_json().unwrap_or_else(|_| serde_json::Value::Null);
+                let tree_json = tree.to_json().unwrap_or_else(|e| {
+                    serde_json::json!({"error": format!("tree snapshot failed: {e}")})
+                });
                 let _ = tx.send(serde_json::json!({
                     "tick": tick_count,
                     "status": format!("{:?}", status),
@@ -212,14 +245,29 @@ impl BTreeExecutor {
             }
 
             if let Some(ref wal_path) = self.wal_path {
+                // Blocking file IO must not run on the async worker: hand it
+                // to the blocking pool and await it, preserving entry order.
+                let path = wal_path.clone();
+                let identity = self.mission_identity.clone();
                 let entry = crate::wal::WalEntry {
                     tick: tick_count,
                     status: format!("{:?}", status),
                     blackboard: context.blackboard.snapshot().await,
-                    tree: tree.to_json().unwrap_or_else(|_| serde_json::Value::Null),
+                    tree: tree.to_json().unwrap_or_else(|e| {
+                        serde_json::json!({"error": format!("tree snapshot failed: {e}")})
+                    }),
+                    mission: identity.as_ref().map(|(name, _)| name.clone()),
+                    mission_hash: identity.as_ref().map(|(_, hash)| hash.clone()),
                 };
-                if let Err(e) = crate::wal::append_wal(wal_path, &entry) {
-                    warn!("WAL append failed at tick {}: {}", tick_count, e);
+                match tokio::task::spawn_blocking(move || crate::wal::append_wal(&path, &entry)).await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        warn!("WAL append failed at tick {}: {}", tick_count, e);
+                    }
+                    Err(join) => {
+                        warn!("WAL blocking task failed at tick {}: {}", tick_count, join);
+                    }
                 }
             }
 

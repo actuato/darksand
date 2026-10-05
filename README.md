@@ -1,4 +1,4 @@
-# Darksand — governed execution for physical systems
+# Darksand: governed execution for physical systems
 
 ![license](https://img.shields.io/badge/license-MIT-blue?style=flat)
 ![rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=flat&logo=rust)
@@ -6,18 +6,17 @@
 ![platform](https://img.shields.io/badge/containment-linux-yellow?style=flat&logo=linux)
 ![status](https://img.shields.io/badge/stage-technical_preview-orange?style=flat)
 
-**Action → Run → Proof for robots.** Deterministic behavior-tree missions run
-under a safety containment halt, governed by signed policy, with every run
-leaving tamper-evident receipts.
+**Action → Run → Proof for robots.** Missions are declared as files, runs are
+bounded by containment, and every run leaves signed receipts.
 
-Darksand sits *under* any policy model (VLA, diffusion, heuristic) and sells
-compliance, not intelligence: missions are declared, execution is bounded, and
-the audit trail is signed.
+Darksand sits under any policy model (VLA, diffusion, heuristic). It does not
+pick actions. It checks that actions are allowed, stops the robot when they
+are not, and proves what happened.
 
-> Rebranded to Darksand; originally extracted from upstream runtime +
-> control-plane repos at commit `7e6098ef9` (2026-10-04) under owner
-> authorization. Both repos are MIT licensed; original copyright headers are
-> preserved in extracted files.
+> Rebranded to Darksand. Extracted from upstream runtime and control-plane
+> repos at commit `7e6098ef9` (2026-10-04) under owner authorization. Both
+> repos are MIT licensed. Original copyright headers are preserved in
+> extracted files.
 
 ## How it works
 
@@ -55,9 +54,9 @@ sequenceDiagram
     Note over B: outcome recorded: cancel_ok, zero-vel ok/errors,<br/>margin_ms vs budget, log_ok
 ```
 
-Every halt produces a `HaltOutcome` and feeds a bounded latency histogram
-(`p50`/`p99`/`max` + over-budget count). Margins answer "how close did we come
-to missing the deadline" without extra instrumentation.
+Each halt records a `HaltOutcome` and a latency sample. The histogram tracks
+`p50`/`p99`/`max` plus an over-budget count. Margins show how close a halt
+came to missing its deadline.
 
 ### Run receipts
 
@@ -75,19 +74,21 @@ flowchart LR
 
 | Crate | What it does |
 |---|---|
-| `darksand-btree` | Deterministic mission core: control flow, decorators, blackboard conditions, ROS action nodes (`ros2` = stub, `ros2-live` = real `r2r`). JSON mission loader (`darksand-mission.v1` + goal/disposition/cost header), per-tick WAL journal + resume, max-ticks/deadline/cancel, tick observer. Deferred: LLM planners, tool registry, visualizer. |
-| `darksand-safety` | Containment: `ContainmentGuard`/`Supervisor` (worker process, cgroup on Linux, timeout + SIGKILL), `ViolationEventBus`, signed hash-chained records, `verify_log_chain`, `summarize_log`. Non-Linux is a dev-only stub. |
-| `darksand-ros2` | ROS 2 node (`r2r`, feature-gated), Nav2 (`navigate_to_pose`), `/cmd_vel` safety publisher, containment bridge (20 ms cancel + 3 s zero-velocity + safe-idle + `HaltOutcome`/`HaltMetrics` + receipt export). |
-| `darksand-recovery` | Nav2 recoveries (spin, backup, clear-costmap) + generic retry classification. No-ops without the `ros2` feature. |
-| `darksand-policy` | Standalone policy service (SQLite): versioned robot-mode policies (`supervised\|active\|disabled`), allow-lists, Ed25519-signed lifecycle commands with nonce replay protection, audit trail. |
-| `darksand-fleet` | Fleet agent: register / config-sync / signed telemetry. Real system stats; mock values only in explicit `mock_mode`. `.darksand/` key material is never committed. |
-| `darksand-swarm` | Coordination primitives. Transport is in-process only (no multi-host yet); message signing unintegrated. |
-| `darksand-sensors` | GPIO/camera/lidar interfaces. Hardware backends are simulated (test-pattern frames, sine-wave scans); actuators default to safety-blocked. |
-| `darksand-simulation` | Sim envs (`virtual_swarm` real; `gazebo`/`isaac_sim` config names only) + versioned `SimManifest` (properties hashed for run comparability). |
-| `missions/` | Example mission files (`wharf-inspection.json`). |
-| `config/robotics.example.json5` | All sections disabled by default. |
+| `darksand-btree` | Deterministic mission core: control flow, decorators (`Repeat`, `Retry`, `Timeout`, `Watchdog`), blackboard conditions, ROS action nodes (`ros2` = stub, `ros2-live` = real `r2r`). JSON mission loader with goal, disposition, and cost header. Per-tick WAL journal with identity checks and resume. Max-ticks, deadline, cancel, tick observer. Goal-gated `RunProof`: success without a satisfied goal is not proof. Static `lint()` and structural `cost_bound()`. Deferred: LLM planners, tool registry, visualizer. |
+| `darksand-safety` | Containment: `ContainmentGuard`/`Supervisor` (worker process, cgroup on Linux, timeout and SIGKILL). Exact violation taxonomy (`Time`, `Cpu`, `Infra`, `Malformed`). Signed hash-chained records with fsync. Chain recovery across restarts. `verify_log_chain` and `summarize_log`. Non-Linux is a dev-only stub. |
+| `darksand-ros2` | ROS 2 node (`r2r`, feature-gated), Nav2 (`navigate_to_pose`), `/cmd_vel` safety publisher, containment bridge (20 ms cancel, 3 s zero-velocity loop with per-halt isolated counts, safe-idle gate, `HaltOutcome` with sequence numbers and margins, `HaltMetrics` histogram, STL-style coverage metric, receipt export). Legacy cancel now cancels the live goal. |
+| `darksand-recovery` | Nav2 recoveries (spin, backup, clear-costmap) plus retry classification with capped backoff. Callers must gate recovery on safe-idle. No-ops without the `ros2` feature. |
+| `darksand-policy` | Standalone policy service (SQLite): versioned robot-mode policies (`supervised\|active\|disabled`), allow-lists, Ed25519-signed lifecycle commands with nonce replay protection and reaping, constant-time auth, enforced expiry reads, audit trail. Fleet control plane (`register`, `config`, `telemetry`, `deregister`, `agents`) with signature verification. |
+| `darksand-fleet` | Fleet agent: register, config-sync, signed telemetry upload against the live policy service. Deterministic canonical signing (`BTreeMap`), key directory override, traversal-proof key paths. Mock values only in explicit `mock_mode`. Key material is never committed. |
+| `darksand-config` | Typed loader for `config/robotics.example.json5`. Strict sections, unknown fields rejected, `agent_id` generation, API secret resolved from env. |
+| `darksand-swarm` | Coordination primitives. In-process transport only. Signed ingress with replay guard and timestamp skew checks. Election re-arming, leader recovery, heartbeat broadcast, no self-eviction. |
+| `darksand-sensors` | GPIO, camera, and lidar interfaces. Hardware backends are simulated and labeled `Synthetic`. Force and tactile schema without a fabricating reader. Two-phase actuator confirmation with honest backends. |
+| `darksand-simulation` | Sim envs (`virtual_swarm` real; `gazebo`/`isaac_sim` config names only). Measured benchmarks pinned to a versioned `SimManifest` digest. Sim-to-real metrics (rank correlation, replay error) with comparability checks. |
+| `missions/` | Example mission files (`wharf-inspection.json`, carries a goal header and proves in test). |
+| `config/robotics.example.json5` | All sections disabled by default. Parses through `darksand-config`. |
+| `policy/` | Unbuilt Go reference. See `policy/README.md`. The live plane is `darksand-policy`. |
 | `reference/` | Rebranded upstream sources not yet promoted. |
-| `docker/Dockerfile.ros2` | ROS Humble build + stub-test gate. |
+| `docker/Dockerfile.ros2` | ROS Humble build. Root `.dockerignore` keeps build context lean. |
 
 ## Quickstart
 
@@ -101,20 +102,17 @@ cargo test -p darksand-btree --features ros2
 # real r2r bindings (needs ROS Humble on the host or Docker)
 docker build -f docker/Dockerfile.ros2 .
 
-# policy service
+# policy service (also serves the fleet control plane)
 DARKSAND_POLICY_KEYS="tenant:key" cargo run -p darksand-policy
 ```
 
 Run a mission file through the contained executor:
 
 ```rust
-let mut tree = darksand_btree::mission_from_file("missions/wharf-inspection.json")?;
-let mut ctx = darksand_btree::core::BTreeContext::new();
-let result = darksand_btree::BTreeExecutor::new()
-    .with_wal("run.jsonl")              // crash recovery journal
-    .execute_with_cancel(&mut *tree, &mut ctx, idle_rx)  // safe-idle gate
-    .await?;
-// after a crash: darksand_btree::resume_mission_from_wal(mission_json, "run.jsonl").await?
+let mission = darksand_btree::Mission::from_file("missions/wharf-inspection.json")?;
+assert!(mission.lint().is_empty());
+let proof = mission.run(Default::default()).await?;
+assert!(proof.is_proof()); // success AND goal satisfied
 ```
 
 Verify an audit log:
@@ -124,29 +122,32 @@ darksand_safety::verify_log_chain("violations.jsonl", &verifying_key)?;
 let summary = darksand_safety::summarize_log("violations.jsonl")?;
 ```
 
+## Status
+
+Implemented and tested in this branch:
+
+* Mission files (`darksand-mission.v1`): loader, validation, lint, cost bounds, goal-gated proofs, WAL journal with resume.
+* Containment halts: exact violation taxonomy, isolated per-halt counts, audit records on every path including lag recovery, latency histograms, receipt export.
+* Fleet loop closed: agent and policy service tested together over real HTTP (register, config sync, telemetry, deregister, wrong-key and unknown-agent rejection).
+* Config, sim manifests, transfer metrics, swarm verified ingress, actuator confirmation.
+
+Test counts (all passing): btree 54 (62 with `ros2`), safety 29, ros2 39, swarm 32, sim 27, fleet 16, policy 6, sensors 10, config 4, recovery 3.
+
+Not yet done (needs hardware or formal methods): independent safety channel, odometry subscribers, live Prometheus scrape, rppal and V4L2 backends, multi-host swarm transport, model-checked monitors.
+
 ## Honest stubs
 
-No hardware is claimed. Today: swarm transport is in-process, sensors are
-simulated, `gazebo`/`isaac_sim` are config names, fleet dashboard has no
-store, recovery/fleet paths are local-only or mock-gated, and containment is
-only enforced on Linux. See each crate's docs for the exact boundary.
+No hardware is claimed. Swarm transport is in-process (inbound `receive()` is unimplemented, so swarm signature checks run at the coordinator ingress, not on real traffic). Sensors are simulated with no force or tactile backend. `gazebo` and `isaac_sim` are config names. Recovery and fleet paths are local-only or mock-gated outside the tested loop. Containment is only enforced on Linux. The Go `policy/` tree is an unbuilt reference (see `policy/README.md`); the live policy plane is `darksand-policy`. Each crate's docs state the exact boundary.
 
 ## Roadmap
 
-* **Phase 0 — Repair (this branch):** fleet honesty fixes, standalone BT
-  core, standalone policy service, ROS 2 Docker CI, `darksand-*` renames.
-* **Phase 1 — Single-robot MVP:** JSON mission files → BT + Nav2 under
-  containment, signed run receipts, Gazebo sim-in-loop. *(Mission loader,
-  WAL resume, halt metrics, and receipt export are done; HIL numbers pending.)*
-* **Phase 2 — Fleet control plane:** registration, config push, real
-  telemetry dashboards, policy governance per robot mode.
-* **Phase 3 — Swarm + HIL:** multi-host transport, Isaac Sim, self-hosted rig.
+* **Phase 0: Repair (this branch).** fleet honesty fixes, standalone BT core, standalone policy service, ROS 2 Docker CI, `darksand-*` renames.
+* **Phase 1: Single-robot MVP.** JSON mission files to BT plus Nav2 under containment, signed run receipts, Gazebo sim-in-loop. (Mission loader, WAL resume, halt metrics, and receipt export are done. HIL numbers are pending.)
+* **Phase 2: Fleet control plane.** registration, config push, real telemetry dashboards, policy governance per robot mode. (Register, config, telemetry, and deregister against the live service are done. Dashboards are pending.)
+* **Phase 3: Swarm plus HIL.** multi-host transport, Isaac Sim, self-hosted rig.
 
-Not building: LLM planners as product surface, marketplace, workflow
-builder, new protocols — frozen until Phase 1 ships.
+Not building: LLM planners as product surface, marketplace, workflow builder, new protocols. Frozen until Phase 1 ships.
 
 ## Safety invariants
 
-Server-side authz (bearer tenants; all v1 key-holders are admin), tenant-scoped
-state, deny-by-default targets, no blind replay of uncertain effects, signed
-commands with 5-minute skew + nonce replay windows, no secrets in logs or git.
+Server-side authz (bearer tenants; all v1 key-holders are admin), tenant-scoped state, deny-by-default targets, no blind replay of uncertain effects, signed commands with 5-minute skew plus nonce replay windows, no secrets in logs or git. Test keys that were once committed have been purged; rotate anything that trusted them.

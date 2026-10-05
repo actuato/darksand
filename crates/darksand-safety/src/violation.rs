@@ -7,10 +7,15 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ViolationKind {
     Time,
     Cpu,
+    /// Worker infrastructure failure: spawn failed, IPC broke, or the
+    /// violation log itself was unwritable. Never a mission timeout.
+    Infra,
+    /// Worker returned output that is not valid result JSON.
+    Malformed,
 }
 
 /// Robotics metadata captured at the moment of a containment violation.
@@ -133,6 +138,11 @@ impl ViolationRecord {
     }
 
     /// Append this record as a JSONL line to `path`.
+    ///
+    /// The file is flushed to the OS before returning so a record reported
+    /// as committed survives anything short of kernel-level loss. (Full
+    /// crash-proofing also needs same-filesystem atomic renames; the JSONL
+    /// format keeps appends to single short writes instead.)
     pub fn append_to_log(&self, path: &str) -> std::io::Result<()> {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         writeln!(
@@ -140,7 +150,32 @@ impl ViolationRecord {
             "{}",
             serde_json::to_string(self).expect("ViolationRecord is always serializable")
         )?;
+        file.sync_all()?;
         Ok(())
+    }
+
+    /// Read the hash of the last record in an existing log, for chain recovery
+    /// across restarts. Returns `""` when the log is missing or empty (fresh
+    /// chain); corrupt lines fail closed.
+    pub fn last_hash_from_log(path: &str) -> std::io::Result<String> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+            Err(e) => return Err(e),
+        };
+        let mut last: Option<ViolationRecord> = None;
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            last = Some(serde_json::from_str(line).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("corrupt violation log line: {e}"),
+                )
+            })?);
+        }
+        Ok(last.map(|r| r.hash).unwrap_or_default())
     }
 
     /// Recompute this record's hash from its fields.
@@ -203,6 +238,9 @@ pub fn summarize_log(path: &str) -> Result<LogSummary, String> {
         match record.violation_kind {
             ViolationKind::Time => summary.time_violations += 1,
             ViolationKind::Cpu => summary.cpu_violations += 1,
+            // Infra/Malformed are worker-pipeline faults, not bound
+            // violations: counted in the total, not in either class.
+            ViolationKind::Infra | ViolationKind::Malformed => {}
         }
         if record.robotics.is_some() {
             summary.robotics_records += 1;

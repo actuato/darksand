@@ -13,6 +13,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 async-trait = "0.1"
+sha2 = { workspace = true }
 darksand-ros2 = { path = "../darksand-ros2", optional = true }
 
 [features]

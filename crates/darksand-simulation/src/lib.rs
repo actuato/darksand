@@ -3,8 +3,10 @@
 //! Provides virtual environments and chaos testing for AI agents.
 
 pub mod manifest;
+pub mod sim2real;
 
 pub use manifest::SimManifest;
+pub use sim2real::{replay_error, spearman_rank_correlation, ReplayError, TransferReport};
 
 use anyhow::Result;
 use rand::Rng;
@@ -127,6 +129,10 @@ pub struct BenchmarkResult {
     pub duration_ms: u64,
     pub success: bool,
     pub metrics: HashMap<String, f64>,
+    /// Digest of the [`SimManifest`] the run executed under. Results are
+    /// only comparable across equal digests.
+    #[serde(default)]
+    pub sim_digest: String,
 }
 
 impl BenchmarkRunner {
@@ -136,19 +142,42 @@ impl BenchmarkRunner {
         }
     }
 
-    pub async fn run_benchmark(&mut self, name: &str) -> Result<BenchmarkResult> {
+    /// Benchmark an environment snapshot honestly: the result carries the
+    /// environment's measured agent health plus the manifest digest it ran
+    /// under, so results from different simulator properties are never
+    /// silently compared. `success` is derived (all spawned agents active),
+    /// never hardcoded.
+    pub async fn run_benchmark(
+        &mut self,
+        name: &str,
+        env: &SimulationEnvironment,
+        manifest: &SimManifest,
+    ) -> Result<BenchmarkResult> {
         let start = std::time::Instant::now();
 
-        // Simulated benchmark
+        // Simulated benchmark workload.
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         let duration = start.elapsed().as_millis() as u64;
 
+        let total = env.get_agent_count();
+        let active = env.get_active_agents();
+        let success_rate = if total == 0 {
+            0.0
+        } else {
+            active as f64 / total as f64
+        };
+        let mut metrics = HashMap::new();
+        metrics.insert("agent_total".to_string(), total as f64);
+        metrics.insert("agent_active".to_string(), active as f64);
+        metrics.insert("success_rate".to_string(), success_rate);
+
         let result = BenchmarkResult {
             test_name: name.to_string(),
             duration_ms: duration,
-            success: true,
-            metrics: HashMap::new(),
+            success: success_rate >= 1.0 && total > 0,
+            metrics,
+            sim_digest: manifest.digest(),
         };
 
         self.results.insert(name.to_string(), result.clone());
@@ -622,12 +651,36 @@ mod tests {
 
     #[tokio::test]
     async fn test_benchmark() {
+        let config = SimulationConfig::default();
+        let mut sim = SimulationEnvironment::new(config).await.unwrap();
+        sim.spawn_agent("agent-1".to_string()).await.unwrap();
+        sim.spawn_agent("agent-2".to_string()).await.unwrap();
+        sim.inject_failure("agent-2").await.unwrap();
+
+        let manifest = SimManifest::virtual_swarm();
         let mut runner = BenchmarkRunner::new();
-        let result = runner.run_benchmark("test").await.unwrap();
+        let result = runner.run_benchmark("test", &sim, &manifest).await.unwrap();
 
         assert_eq!(result.test_name, "test");
-        assert!(result.success);
+        // 1/2 agents active: honest partial success, pinned to the manifest.
+        assert!(!result.success);
+        assert_eq!(result.metrics["success_rate"], 0.5);
+        assert_eq!(result.sim_digest, manifest.digest());
         assert!(result.duration_ms > 0);
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_all_healthy_succeeds() {
+        let config = SimulationConfig::default();
+        let mut sim = SimulationEnvironment::new(config).await.unwrap();
+        sim.spawn_agent("agent-1".to_string()).await.unwrap();
+
+        let manifest = SimManifest::virtual_swarm();
+        let mut runner = BenchmarkRunner::new();
+        let result = runner.run_benchmark("ok", &sim, &manifest).await.unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.metrics["success_rate"], 1.0);
     }
 
     // ========================================================================

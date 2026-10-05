@@ -107,6 +107,19 @@ impl Supervisor {
         self
     }
 
+    /// Join the hash chain to an existing log instead of starting a fork.
+    ///
+    /// Call after construction when the supervisor restarts against a
+    /// persisted log: the next record chains from the log's last hash, so
+    /// `verify_log_chain` keeps passing across restarts. Missing/empty log
+    /// keeps the fresh (empty) chain; a corrupt log fails here, loudly.
+    pub fn recover_chain(&mut self) -> Result<(), String> {
+        let hash = ViolationRecord::last_hash_from_log(&self.config.log_path)
+            .map_err(|e| e.to_string())?;
+        self.config.last_hash = hash;
+        Ok(())
+    }
+
     /// Spawn a fresh worker process and attach it to a cgroup.
     fn spawn_worker(&mut self) -> Result<(), String> {
         let worker_bin = self
@@ -260,16 +273,38 @@ impl Supervisor {
         cfg!(target_os = "linux")
     }
 
+    /// Classify a finished worker IPC exchange into its exact violation kind.
+    ///
+    /// Pure function so the audit taxonomy is unit-testable without spawning
+    /// a worker: only an elapsed deadline is `Time`; broken pipes, EOF, and
+    /// empty answers are `Infra`; successfully-read but unparsable output is
+    /// `Malformed` (parse itself happens in `execute`).
+    fn classify_ipc(
+        timed_out: bool,
+        outcome: &std::io::Result<String>,
+    ) -> Option<ViolationKind> {
+        if timed_out {
+            return Some(ViolationKind::Time);
+        }
+        match outcome {
+            Err(_) => Some(ViolationKind::Infra),
+            Ok(line) if line.trim().is_empty() => Some(ViolationKind::Infra),
+            Ok(_) => None,
+        }
+    }
+
     /// Execute a job in the worker process.
     ///
     /// Sends `job` as a single JSON line to the worker's stdin and reads one JSON line
     /// from stdout. A hard timeout of `bounds.max_tick_ms` is applied.
     ///
-    /// On timeout the worker is SIGKILLed, a signed violation record is written, and a
-    /// fresh worker is spawned before returning `Err(ViolationKind::Time)`.
+    /// Violation kinds are exact, not bucketed: `Time` on timeout (worker
+    /// SIGKILLed, signed record written, fresh worker respawned),
+    /// `Infra` when the worker cannot even be spawned, `Malformed` when the
+    /// worker answers with unparsable output.
     pub async fn execute(&mut self, job: Value) -> Result<Value, ViolationKind> {
         if self.worker.is_none() {
-            self.spawn_worker().map_err(|_| ViolationKind::Cpu)?;
+            self.spawn_worker().map_err(|_| ViolationKind::Infra)?;
         }
 
         let job_bytes = {
@@ -281,30 +316,52 @@ impl Supervisor {
         let duration = Duration::from_millis(self.config.bounds.max_tick_ms);
 
         // Borrow stdin/stdout from the worker for the IPC future.
+        // `timed_out` distinguishes a deadline overrun (Time) from a dead
+        // worker pipe (Infra); the happy path parses below (Malformed).
+        let mut timed_out = false;
         let ipc_result = {
             let w = self.worker.as_mut().unwrap();
             let stdin = &mut w.stdin;
             let stdout = &mut w.stdout;
-            timeout(duration, async {
+            let inner = timeout(duration, async {
                 stdin.write_all(job_bytes.as_bytes()).await?;
                 stdin.flush().await?;
                 let mut line = String::new();
                 stdout.read_line(&mut line).await?;
                 std::io::Result::Ok(line)
             })
-            .await
+            .await;
+            match inner {
+                Err(_) => {
+                    timed_out = true;
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "worker tick deadline exceeded",
+                    ))
+                }
+                Ok(r) => r,
+            }
         };
 
         match ipc_result {
-            Ok(Ok(line)) if !line.trim().is_empty() => {
-                // Happy path: parse and return the result JSON.
-                serde_json::from_str::<Value>(line.trim()).map_err(|_| ViolationKind::Cpu)
+            Ok(line) if !line.trim().is_empty() => {
+                // Happy path: parse and return the result JSON. Unparsable
+                // worker output is a distinct violation kind, not a timeout.
+                serde_json::from_str::<Value>(line.trim())
+                    .map_err(|_| ViolationKind::Malformed)
             }
-            _ => {
-                // Timeout or IO error — kill, reap, record, respawn.
+            other => {
+                // Timeout, dead pipe, or empty answer — kill, reap, record
+                // the exact kind, respawn.
+                let probe: std::io::Result<String> = match &other {
+                    Ok(line) => Ok(line.clone()),
+                    Err(e) => Err(std::io::Error::new(e.kind(), "worker IPC failed")),
+                };
+                let kind =
+                    Self::classify_ipc(timed_out, &probe).unwrap_or(ViolationKind::Infra);
                 self.kill_worker();
                 self.reap_worker().await;
-                if !self.record_violation(ViolationKind::Time, job) {
+                if !self.record_violation(kind, job) {
                     error!(
                         log_path = %self.config.log_path,
                         "Violation occurred but the signed record could not be persisted"
@@ -312,7 +369,7 @@ impl Supervisor {
                 }
                 // Best-effort respawn; ignore failure (caller gets Err).
                 let _ = self.spawn_worker();
-                Err(ViolationKind::Time)
+                Err(kind)
             }
         }
     }
@@ -403,12 +460,50 @@ mod tests {
     }
 
     #[test]
-    fn test_containment_enforced_matches_platform() {
-        assert_eq!(
+    fn test_containment_enforced_matches_platform() {        assert_eq!(
             Supervisor::containment_enforced(),
             cfg!(target_os = "linux")
         );
         assert_eq!(crate::cgroup::CGroup::is_enforced(), cfg!(target_os = "linux"));
+    }
+
+    #[test]
+    fn test_recover_chain_joins_existing_log() {
+        use crate::violation::ViolationRecord;
+        let log = std::env::temp_dir()
+            .join("darksand_sup_recover_test.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_file(&log);
+        // Fresh log: empty chain.
+        assert_eq!(ViolationRecord::last_hash_from_log(&log).unwrap(), "");
+        assert_eq!(
+            ViolationRecord::last_hash_from_log("/tmp/definitely-not-here-darksand.jsonl")
+                .unwrap(),
+            ""
+        );
+
+        // Write a record, then recover: next record chains from it.
+        let key = SigningKey::from_bytes(&[8u8; 32]);
+        let bounds = Bounds::new(50, 100);
+        let mut first = Supervisor::new(bounds.clone(), key, log.clone());
+        assert!(first.record_violation(ViolationKind::Time, serde_json::json!({})));
+        let head = ViolationRecord::last_hash_from_log(&log).unwrap();
+        assert!(!head.is_empty());
+
+        let key2 = SigningKey::from_bytes(&[8u8; 32]);
+        let mut second = Supervisor::new(bounds, key2, log.clone());
+        second.recover_chain().unwrap();
+        assert!(second.record_violation(ViolationKind::Cpu, serde_json::json!({})));
+        assert_eq!(ViolationRecord::last_hash_from_log(&log).unwrap(), second.config.last_hash);
+
+        // Full chain verifies across the restart.
+        let same = SigningKey::from_bytes(&[8u8; 32]);
+        assert!(crate::violation::verify_log_chain(&log, &same.verifying_key()).is_ok());
+        let wrong = SigningKey::from_bytes(&[9u8; 32]);
+        // Different key must NOT verify (proves the check is real).
+        assert!(crate::violation::verify_log_chain(&log, &wrong.verifying_key()).is_err());
+        let _ = std::fs::remove_file(&log);
     }
 
     /// Full supervisor round-trip test.
@@ -447,5 +542,43 @@ mod tests {
         );
         assert!(std::fs::metadata(&log).is_ok(), "violation log must exist");
         let _ = std::fs::remove_file(&log);
+    }
+
+    #[test]
+    fn test_classify_ipc_exact_kinds() {
+        use std::io::{Error, ErrorKind};
+        // Elapsed deadline is always Time, whatever the pipe says.
+        assert_eq!(
+            Supervisor::classify_ipc(true, &Ok("anything".to_string())),
+            Some(ViolationKind::Time)
+        );
+        assert_eq!(
+            Supervisor::classify_ipc(
+                true,
+                &Err(Error::new(ErrorKind::BrokenPipe, "x"))
+            ),
+            Some(ViolationKind::Time)
+        );
+        // Dead pipe / EOF / empty answer without a timeout is Infra.
+        assert_eq!(
+            Supervisor::classify_ipc(
+                false,
+                &Err(Error::new(ErrorKind::BrokenPipe, "x"))
+            ),
+            Some(ViolationKind::Infra)
+        );
+        assert_eq!(
+            Supervisor::classify_ipc(false, &Ok(String::new())),
+            Some(ViolationKind::Infra)
+        );
+        assert_eq!(
+            Supervisor::classify_ipc(false, &Ok("   \n".to_string())),
+            Some(ViolationKind::Infra)
+        );
+        // Readable output is the caller's to parse: no violation yet.
+        assert_eq!(
+            Supervisor::classify_ipc(false, &Ok("{\"a\":1}".to_string())),
+            None
+        );
     }
 }

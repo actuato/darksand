@@ -105,12 +105,14 @@ impl crate::core::BTreeNode for RosTopicPublish {
             }
         };
 
-        // Rate limiting envelope check
+        // Rate limiting envelope check. Throttled ticks report Running (try
+        // again next tick), never Failure: a limiter must delay a Sequence,
+        // not abort it.
         if self.min_interval_ms > 0 {
             if let Some(last) = self.last_publish {
                 if last.elapsed() < Duration::from_millis(self.min_interval_ms) {
                     debug!("[RosTopicPublish] {} rate-limited", self.name);
-                    return Ok(NodeStatus::Failure);
+                    return Ok(NodeStatus::Running);
                 }
             }
         }
@@ -574,8 +576,9 @@ mod tests {
         // First call should succeed.
         assert_eq!(pub_node.tick(&mut ctx).await.unwrap(), NodeStatus::Success);
 
-        // Immediate second call should be rate-limited → Failure.
-        assert_eq!(pub_node.tick(&mut ctx).await.unwrap(), NodeStatus::Failure);
+        // Immediate second call is rate-limited → Running (retry next tick),
+        // never Failure: a limiter delays the Sequence, it must not abort it.
+        assert_eq!(pub_node.tick(&mut ctx).await.unwrap(), NodeStatus::Running);
     }
 
     // ── End-to-end: Gazebo TurtleBot3 demo BT (no live ROS2 required) ─────────

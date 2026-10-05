@@ -1,7 +1,9 @@
 //! Message transport for swarm inter-agent communication.
 //!
-//! Provides both in-process channel transport (for agents within the same process)
-//! and HTTP transport (for agents on different machines).
+//! In-process channel transport (for agents within the same process).
+//! There is deliberately no HTTP/multi-host transport yet: every
+//! `SwarmMessage` below crosses a channel, and verified ingress happens in
+//! [`SwarmCoordinator::process_envelope`](crate::SwarmCoordinator::process_envelope).
 
 use anyhow::Result;
 use async_trait::async_trait;

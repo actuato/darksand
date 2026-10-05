@@ -7,19 +7,18 @@ use serde_json::Value;
 
 /// Repeat: Repeat child N times or infinitely.
 ///
-/// This decorator continuously re-executes its child node either a fixed
-/// number of times or forever. After each completion (Success or Failure),
-/// the child is reset and ticked again.
+/// This decorator re-executes its child until it has succeeded N times (or
+/// forever when no count is given). Only successful iterations advance the
+/// counter; the tick that completes the final iteration reports `Success`
+/// directly, with no extra `Running` tick.
 ///
 /// # Behavior
 ///
 /// - Ticks child node
-/// - When child reaches terminal status (Success/Failure):
-///   - Increments completion counter
-///   - Resets child
-///   - If count limit reached, returns `Success`
-///   - Otherwise, returns `Running` (will tick child again next cycle)
-/// - Always returns `Running` until count is reached (or forever if infinite)
+/// - Child `Success`: increments counter, resets child; returns `Success`
+///   when the count is reached, `Running` otherwise
+/// - Child `Failure`: returns `Failure` immediately (never swallowed)
+/// - Child `Running`/`Skipped`: passes through unchanged
 ///
 /// # Use Cases
 ///
@@ -165,13 +164,24 @@ impl BTreeNode for Repeat {
             }
         }
 
-        let status = self.child.tick(context).await?;
-        if status.is_terminal() {
-            self.current += 1;
-            self.child.reset().await;
+        // Only successful iterations advance the count. A child failure fails
+        // the repeat immediately instead of being swallowed and retried as if
+        // it had succeeded. The tick that completes the final iteration
+        // reports Success directly (no extra Running tick).
+        match self.child.tick(context).await? {
+            NodeStatus::Success => {
+                self.current += 1;
+                self.child.reset().await;
+                if let Some(max) = self.count {
+                    if self.current >= max {
+                        return Ok(NodeStatus::Success);
+                    }
+                }
+                Ok(NodeStatus::Running)
+            }
+            NodeStatus::Failure => Ok(NodeStatus::Failure),
+            other => Ok(other),
         }
-
-        Ok(NodeStatus::Running)
     }
 
     async fn reset(&mut self) {
@@ -186,5 +196,87 @@ impl BTreeNode for Repeat {
             "count": self.count,
             "child": self.child.to_json()?
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nodes::action::SetBlackboard;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    struct FailNode;
+    #[async_trait]
+    impl BTreeNode for FailNode {
+        fn name(&self) -> &str {
+            "fail"
+        }
+        fn node_type(&self) -> &str {
+            "Fail"
+        }
+        async fn tick(&mut self, _context: &mut BTreeContext) -> Result<NodeStatus> {
+            Ok(NodeStatus::Failure)
+        }
+        fn to_json(&self) -> Result<Value> {
+            Ok(serde_json::json!({"type": "Fail"}))
+        }
+    }
+
+    struct CountNode {
+        ticks: Arc<AtomicU32>,
+    }
+    #[async_trait]
+    impl BTreeNode for CountNode {
+        fn name(&self) -> &str {
+            "count"
+        }
+        fn node_type(&self) -> &str {
+            "Count"
+        }
+        async fn tick(&mut self, _context: &mut BTreeContext) -> Result<NodeStatus> {
+            self.ticks.fetch_add(1, Ordering::Relaxed);
+            Ok(NodeStatus::Success)
+        }
+        fn to_json(&self) -> Result<Value> {
+            Ok(serde_json::json!({"type": "Count"}))
+        }
+    }
+
+    #[tokio::test]
+    async fn child_failure_fails_repeat_immediately() {
+        let mut node = Repeat::new("r", Box::new(FailNode), Some(3));
+        let mut ctx = BTreeContext::new();
+        assert_eq!(node.tick(&mut ctx).await.unwrap(), NodeStatus::Failure);
+    }
+
+    #[tokio::test]
+    async fn success_reported_on_final_tick_without_extra_running() {
+        let ticks = Arc::new(AtomicU32::new(0));
+        let mut node = Repeat::new(
+            "r",
+            Box::new(CountNode {
+                ticks: Arc::clone(&ticks),
+            }),
+            Some(3),
+        );
+        let mut ctx = BTreeContext::new();
+        assert_eq!(node.tick(&mut ctx).await.unwrap(), NodeStatus::Running);
+        assert_eq!(node.tick(&mut ctx).await.unwrap(), NodeStatus::Running);
+        assert_eq!(node.tick(&mut ctx).await.unwrap(), NodeStatus::Success);
+        assert_eq!(ticks.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn set_blackboard_repeat_accumulates() {
+        let mut node = Repeat::new(
+            "r",
+            Box::new(SetBlackboard::new("s", "k", "v")),
+            Some(2),
+        );
+        let mut ctx = BTreeContext::new();
+        assert_eq!(node.tick(&mut ctx).await.unwrap(), NodeStatus::Running);
+        assert_eq!(node.tick(&mut ctx).await.unwrap(), NodeStatus::Success);
+        assert!(ctx.blackboard.contains("k").await);
     }
 }

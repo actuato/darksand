@@ -136,6 +136,9 @@ impl BTreeNode for Retry {
                     }
                     self.current_retries += 1;
                     self.child.reset().await;
+                    // Yield so a tight retry loop cannot starve sibling tasks;
+                    // retries still complete within this tick.
+                    tokio::task::yield_now().await;
                     // Continue loop to retry
                 }
                 NodeStatus::Skipped => {
@@ -158,5 +161,71 @@ impl BTreeNode for Retry {
             "current_retries": self.current_retries,
             "child": self.child.to_json()?
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    /// Fails `fail_times` ticks, then succeeds. Counts invocations.
+    struct ScriptedNode {
+        fail_times: u32,
+        calls: Arc<AtomicU32>,
+    }
+    #[async_trait]
+    impl BTreeNode for ScriptedNode {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        fn node_type(&self) -> &str {
+            "Scripted"
+        }
+        async fn tick(&mut self, _context: &mut BTreeContext) -> Result<NodeStatus> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            if call < self.fail_times {
+                Ok(NodeStatus::Failure)
+            } else {
+                Ok(NodeStatus::Success)
+            }
+        }
+        fn to_json(&self) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({"type": "Scripted"}))
+        }
+    }
+
+    #[tokio::test]
+    async fn succeeds_within_budget() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let mut node = Retry::new(
+            "r",
+            Box::new(ScriptedNode {
+                fail_times: 2,
+                calls: Arc::clone(&calls),
+            }),
+            2,
+        );
+        let mut ctx = BTreeContext::new();
+        assert_eq!(node.tick(&mut ctx).await.unwrap(), NodeStatus::Success);
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn exhausts_budget_to_failure() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let mut node = Retry::new(
+            "r",
+            Box::new(ScriptedNode {
+                fail_times: 99,
+                calls: Arc::clone(&calls),
+            }),
+            2,
+        );
+        let mut ctx = BTreeContext::new();
+        assert_eq!(node.tick(&mut ctx).await.unwrap(), NodeStatus::Failure);
+        // 1 initial + 2 retries, all inside one tick.
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
     }
 }

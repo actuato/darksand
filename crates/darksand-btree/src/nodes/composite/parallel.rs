@@ -44,12 +44,20 @@ pub enum ParallelPolicy {
 /// concurrency via sequential async ticking). This enables behaviors where
 /// multiple actions or conditions must be evaluated together.
 ///
+/// # Empty children
+///
+/// Vacuous semantics, documented so missions never depend on an accident:
+/// `RequireAll` with zero children returns `Success`; `RequireOne` with zero
+/// children returns `Failure`.
+///
 /// # Behavior
 ///
 /// - Ticks all children every cycle (doesn't stop early)
 /// - Tracks each child's status independently
 /// - Returns `Running` if any child is `Running`
 /// - Returns terminal status (`Success`/`Failure`) based on policy
+/// - On reaching a terminal status, children are halted (not merely reset)
+///   so concurrently-`Running` siblings stop cleanly
 ///
 /// ## RequireAll Policy
 ///
@@ -174,6 +182,15 @@ impl Parallel {
         self.child_statuses.push(None);
         self
     }
+
+    /// Add multiple children at once (parity with Sequence/Selector).
+    pub fn add_children(mut self, children: Vec<Box<dyn BTreeNode>>) -> Self {
+        for child in children {
+            self.children.push(child);
+            self.child_statuses.push(None);
+        }
+        self
+    }
 }
 
 #[async_trait]
@@ -233,12 +250,13 @@ impl BTreeNode for Parallel {
         match self.policy {
             ParallelPolicy::RequireAll => {
                 if failure_count > 0 {
-                    // Any failure → overall failure
-                    self.reset().await;
+                    // Any failure → overall failure. Halt (not just reset) so
+                    // concurrently-Running children stop cleanly.
+                    self.halt().await;
                     Ok(NodeStatus::Failure)
                 } else if success_count == self.children.len() {
                     // All succeeded
-                    self.reset().await;
+                    self.halt().await;
                     Ok(NodeStatus::Success)
                 } else {
                     // Still running
@@ -248,11 +266,11 @@ impl BTreeNode for Parallel {
             ParallelPolicy::RequireOne => {
                 if success_count > 0 {
                     // At least one success → overall success
-                    self.reset().await;
+                    self.halt().await;
                     Ok(NodeStatus::Success)
                 } else if failure_count == self.children.len() {
                     // All failed
-                    self.reset().await;
+                    self.halt().await;
                     Ok(NodeStatus::Failure)
                 } else {
                     // Still running
@@ -288,5 +306,100 @@ impl BTreeNode for Parallel {
             "policy": format!("{:?}", self.policy),
             "children": children_json?
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nodes::action::SetBlackboard;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    struct FailNode;
+    #[async_trait]
+    impl BTreeNode for FailNode {
+        fn name(&self) -> &str {
+            "fail"
+        }
+        fn node_type(&self) -> &str {
+            "Fail"
+        }
+        async fn tick(&mut self, _context: &mut BTreeContext) -> Result<NodeStatus> {
+            Ok(NodeStatus::Failure)
+        }
+        fn to_json(&self) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({"type": "Fail"}))
+        }
+    }
+
+    struct HaltProbe {
+        ticks: Arc<AtomicU32>,
+        halts: Arc<AtomicU32>,
+    }
+    #[async_trait]
+    impl BTreeNode for HaltProbe {
+        fn name(&self) -> &str {
+            "probe"
+        }
+        fn node_type(&self) -> &str {
+            "Probe"
+        }
+        async fn tick(&mut self, _context: &mut BTreeContext) -> Result<NodeStatus> {
+            self.ticks.fetch_add(1, Ordering::Relaxed);
+            Ok(NodeStatus::Running)
+        }
+        async fn halt(&mut self) {
+            self.halts.fetch_add(1, Ordering::Relaxed);
+        }
+        fn to_json(&self) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({"type": "Probe"}))
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_require_all_succeeds_vacuously() {
+        let mut node = Parallel::new("p", ParallelPolicy::RequireAll);
+        let mut ctx = BTreeContext::new();
+        assert_eq!(node.tick(&mut ctx).await.unwrap(), NodeStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn empty_require_one_fails() {
+        let mut node = Parallel::new("p", ParallelPolicy::RequireOne);
+        let mut ctx = BTreeContext::new();
+        assert_eq!(node.tick(&mut ctx).await.unwrap(), NodeStatus::Failure);
+    }
+
+    #[tokio::test]
+    async fn add_children_matches_repeated_add_child() {
+        let via_batch = Parallel::new("p", ParallelPolicy::RequireAll).add_children(vec![
+            Box::new(SetBlackboard::new("a", "k1", "v1")),
+            Box::new(SetBlackboard::new("b", "k2", "v2")),
+        ]);
+        let via_single = Parallel::new("p", ParallelPolicy::RequireAll)
+            .add_child(Box::new(SetBlackboard::new("a", "k1", "v1")))
+            .add_child(Box::new(SetBlackboard::new("b", "k2", "v2")));
+        assert_eq!(
+            via_batch.to_json().unwrap(),
+            via_single.to_json().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn sibling_running_child_is_halted_on_failure() {
+        let ticks = Arc::new(AtomicU32::new(0));
+        let halts = Arc::new(AtomicU32::new(0));
+        let mut node = Parallel::new("p", ParallelPolicy::RequireAll)
+            .add_child(Box::new(FailNode))
+            .add_child(Box::new(HaltProbe {
+                ticks: Arc::clone(&ticks),
+                halts: Arc::clone(&halts),
+            }));
+        let mut ctx = BTreeContext::new();
+        // Both children tick (no early exit); then overall Failure halts all.
+        assert_eq!(node.tick(&mut ctx).await.unwrap(), NodeStatus::Failure);
+        assert_eq!(ticks.load(Ordering::Relaxed), 1);
+        assert_eq!(halts.load(Ordering::Relaxed), 1);
     }
 }

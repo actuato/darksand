@@ -1,12 +1,12 @@
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use sysinfo::System;
 use tracing::debug;
 
 use crate::LogEntry;
 
 /// Fetch real Prometheus metrics from the /metrics endpoint
-pub async fn fetch_prometheus_metrics(endpoint: &str) -> Result<HashMap<String, f64>> {
+pub async fn fetch_prometheus_metrics(endpoint: &str) -> Result<BTreeMap<String, f64>> {
     let url = format!("{}/metrics", endpoint);
 
     let response = reqwest::get(&url)
@@ -15,7 +15,7 @@ pub async fn fetch_prometheus_metrics(endpoint: &str) -> Result<HashMap<String, 
 
     let metrics_text = response.text().await?;
 
-    let mut metrics_map = HashMap::new();
+    let mut metrics_map = BTreeMap::new();
 
     for line in metrics_text.lines() {
         // Skip comments and empty lines
@@ -99,7 +99,7 @@ pub fn get_system_stats() -> (f32, u64, u32) {
 }
 
 /// Determine health status based on metrics
-pub fn determine_health(metrics: &HashMap<String, f64>, cpu: f32, _memory: u64) -> String {
+pub fn determine_health(metrics: &BTreeMap<String, f64>, cpu: f32, _memory: u64) -> String {
     let error_rate = metrics.get("error_rate").unwrap_or(&0.0);
     let latency = metrics.get("latency_p99_ms").unwrap_or(&0.0);
 
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_determine_health_healthy() {
-        let mut metrics = HashMap::new();
+        let mut metrics = BTreeMap::new();
         metrics.insert("error_rate".to_string(), 0.01);
         metrics.insert("latency_p99_ms".to_string(), 100.0);
 
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn test_determine_health_degraded() {
-        let mut metrics = HashMap::new();
+        let mut metrics = BTreeMap::new();
         metrics.insert("error_rate".to_string(), 0.07);
         metrics.insert("latency_p99_ms".to_string(), 100.0);
 
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn test_determine_health_unhealthy() {
-        let mut metrics = HashMap::new();
+        let mut metrics = BTreeMap::new();
         metrics.insert("error_rate".to_string(), 0.15);
         metrics.insert("latency_p99_ms".to_string(), 100.0);
 
