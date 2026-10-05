@@ -307,3 +307,17 @@ mod tests {
         assert_eq!(status, NodeStatus::Failure);
     }
 }
+
+#[cfg(test)]
+mod empty_tests {
+    use super::*;
+    use crate::core::BTreeContext;
+
+    /// No alternatives to try: an empty Selector fails.
+    #[tokio::test]
+    async fn empty_selector_fails() {
+        let mut sel = Selector::new("empty");
+        let mut ctx = BTreeContext::new();
+        assert_eq!(sel.tick(&mut ctx).await.unwrap(), NodeStatus::Failure);
+    }
+}

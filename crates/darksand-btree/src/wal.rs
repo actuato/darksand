@@ -7,14 +7,15 @@
 //! re-executed mission continues from observed state instead of blank.
 //!
 //! Limits (documented, not hidden):
-//! - The WAL replays *state*, not *effects*: already-sent actuator commands
-//!   are not undone. Downstream systems must tolerate re-ticked actions
-//!   (Nav2 goal re-issue is idempotent; raw `/cmd_vel` publishes are not
-//!   journaled — gate them behind containment).
-//! - Entries are checksummed by length only; tamper evidence comes from the
-//!   signed violation log ([`darksand_safety`] is not a dependency here to
-//!   keep the core dependency-free), not from this file.
-//! - `tick_count` restarts at 1 on resume; the blackboard carries continuity.
+//! - The WAL replays *blackboard state*, not *node cursors*: `Sequence`
+//!   progress, retry counts, and decorator timers restart. Design missions so
+//!   re-ticked actions are idempotent (Nav2 goal re-issue is; raw `/cmd_vel`
+//!   publishes are not journaled — gate them behind containment).
+//! - Entries carry the mission document's identity when the executor was
+//!   given one (`with_mission_identity`); resume refuses a foreign journal.
+//! - A torn tail (crash mid-write) is dropped with a warning; a corrupt
+//!   non-final line fails closed.
+//! - Tamper evidence comes from the signed violation log, not this file.
 
 use crate::core::{BTreeContext, BTreeNode};
 use anyhow::{Context, Result};
@@ -27,6 +28,20 @@ pub struct WalEntry {
     pub blackboard: serde_json::Value,
     #[serde(default)]
     pub tree: serde_json::Value,
+    /// Mission name this tick belongs to (absent in pre-identity journals).
+    #[serde(default)]
+    pub mission: Option<String>,
+    /// SHA-256 of the mission document (absent in pre-identity journals).
+    #[serde(default)]
+    pub mission_hash: Option<String>,
+}
+
+/// SHA-256 hex of a mission document. Pair with
+/// [`resume_mission_from_wal`]: the resume rejects a WAL whose identity does
+/// not match the document being resumed.
+pub fn mission_hash(mission_json: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(mission_json.as_bytes()))
 }
 
 /// Append one entry to the WAL (creates the file on first write).
@@ -47,19 +62,36 @@ pub fn append_wal(path: &str, entry: &WalEntry) -> Result<()> {
 
 /// Read all entries in order; skips blank lines, fails on corrupt JSON.
 pub fn read_wal(path: &str) -> Result<Vec<WalEntry>> {
+    let (entries, _) = read_wal_tolerant(path)?;
+    Ok(entries)
+}
+
+/// Read all entries, tolerating a torn tail.
+///
+/// A crash mid-`writeln` leaves a partial final line — the expected artifact,
+/// not evidence of tampering. A corrupt *non-final* line still fails closed.
+/// Returns `(entries, torn)` where `torn` reports a dropped partial tail.
+pub fn read_wal_tolerant(path: &str) -> Result<(Vec<WalEntry>, bool)> {
     let content =
         std::fs::read_to_string(path).with_context(|| format!("cannot read WAL {path}"))?;
+    let lines: Vec<&str> = content.lines().collect();
     let mut entries = Vec::new();
-    for (idx, line) in content.lines().enumerate() {
+    let mut torn = false;
+    for (idx, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        entries.push(
-            serde_json::from_str(line)
-                .with_context(|| format!("WAL {path} line {idx} is corrupt"))?,
-        );
+        match serde_json::from_str(line) {
+            Ok(entry) => entries.push(entry),
+            Err(_) if idx == lines.len() - 1 => {
+                torn = true; // partial final write from a crash; drop it
+            }
+            Err(e) => {
+                anyhow::bail!("WAL {path} line {idx} is corrupt: {e}");
+            }
+        }
     }
-    Ok(entries)
+    Ok((entries, torn))
 }
 
 /// Rebuild a mission tree and restore the last journaled blackboard snapshot.
@@ -72,10 +104,30 @@ pub async fn resume_mission_from_wal(
     wal_path: &str,
 ) -> Result<(Box<dyn BTreeNode>, BTreeContext)> {
     let tree = crate::mission::mission_from_str(mission_json)?;
-    let entries = read_wal(wal_path)?;
+    // Tolerant read: a torn tail is the expected crash artifact, not tampering.
+    let (entries, torn) = read_wal_tolerant(wal_path)?;
+    if torn {
+        tracing::warn!("WAL {wal_path} had a torn tail; resumed from the intact prefix");
+    }
     let last = entries
         .last()
         .ok_or_else(|| anyhow::anyhow!("WAL {wal_path} has no entries to resume from"))?;
+    // Fail closed on mission mismatch: never inject one mission's state into
+    // another. Journals written before identity existed carry no identity and
+    // are accepted (with the WAL path in the log for audit).
+    if let (Some(wal_name), Some(wal_hash)) = (&last.mission, &last.mission_hash) {
+        let doc: serde_json::Value =
+            serde_json::from_str(mission_json).context("mission document is not valid JSON")?;
+        let doc_name = doc
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default();
+        if wal_name != doc_name || *wal_hash != mission_hash(mission_json) {
+            anyhow::bail!(
+                "WAL {wal_path} belongs to mission {wal_name:?}, not {doc_name:?}: refusing resume"
+            );
+        }
+    }
     let mut context = BTreeContext::new();
     context.blackboard.restore(&last.blackboard).await?;
     context.tick_count = last.tick;
@@ -92,6 +144,8 @@ mod tests {
             status: format!("{phase:?}"),
             blackboard: serde_json::json!({"phase": phase}),
             tree: serde_json::Value::Null,
+            mission: None,
+            mission_hash: None,
         }
     }
 
@@ -112,15 +166,38 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_tail_fails_closed() {
+    fn corrupt_middle_fails_closed() {
         let path = std::env::temp_dir()
             .join("darksand_wal_corrupt_test.jsonl")
             .to_string_lossy()
             .into_owned();
         let _ = std::fs::remove_file(&path);
         append_wal(&path, &entry(1, "starting")).unwrap();
-        std::fs::write(&path, "not json at all\n").unwrap();
+        // Corrupt NON-final line: fail closed, history is suspect.
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "not json at all").unwrap();
+        append_wal(&path, &entry(2, "on-station")).unwrap();
         assert!(read_wal(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn torn_tail_is_dropped_not_fatal() {
+        let path = std::env::temp_dir()
+            .join("darksand_wal_torn_test.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_file(&path);
+        append_wal(&path, &entry(1, "starting")).unwrap();
+        // Simulate a crash mid-write: partial final line, no trailing newline.
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(file, "{{\"tick\": 2, \"stat").unwrap();
+        let (entries, torn) = read_wal_tolerant(&path).unwrap();
+        assert!(torn);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].tick, 1);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -179,7 +256,8 @@ mod tests {
     }
 
     /// Crash-mid-mission recovery: stop early with WAL, resume from the
-    /// journal, run to completion. The resumed run sees leg 1's state.
+    /// journal, run to completion. The resumed run sees leg 1's state, ticks
+    /// stay monotonic, and a foreign journal is refused.
     #[tokio::test]
     async fn crash_mid_mission_resumes_to_success() {
         let path = std::env::temp_dir()
@@ -192,11 +270,13 @@ mod tests {
         let mission = r#"{"version": "darksand-mission.v1", "name": "crash",
             "root": {"type": "Repeat", "name": "twice", "count": 2,
                 "child": {"type": "SetBlackboard", "name": "leg", "key": "n", "value": 7}}}"#;
+        let hash = mission_hash(mission);
         let mut tree = crate::mission::mission_from_str(mission).unwrap();
         let mut ctx = crate::core::BTreeContext::new();
         let partial = crate::BTreeExecutor::new()
             .with_max_ticks(1)
             .with_wal(&path)
+            .with_mission_identity("crash", hash.clone())
             .execute(&mut *tree, &mut ctx)
             .await
             .unwrap();
@@ -205,6 +285,9 @@ mod tests {
         // "Restart": rebuild from mission + WAL and run to completion.
         let (mut tree2, mut ctx2) = resume_mission_from_wal(mission, &path).await.unwrap();
         let done = crate::BTreeExecutor::new()
+            .with_start_tick(ctx2.tick_count)
+            .with_wal(&path)
+            .with_mission_identity("crash", hash)
             .execute(&mut *tree2, &mut ctx2)
             .await
             .unwrap();
@@ -213,6 +296,21 @@ mod tests {
             ctx2.blackboard.get("n").await,
             Some(serde_json::json!(7))
         );
+
+        // Journal ticks are monotonic across the restart: first run ticked
+        // once (1/2 iterations), the resumed run ticks twice more.
+        let ticks: Vec<u64> = read_wal(&path)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.tick)
+            .collect();
+        assert_eq!(ticks, vec![1, 2, 3]);
+
+        // A different mission document is refused the journal.
+        let foreign = r#"{"version": "darksand-mission.v1", "name": "other",
+            "root": {"type": "SetBlackboard", "name": "x", "key": "q", "value": 0}}"#;
+        assert!(resume_mission_from_wal(foreign, &path).await.is_err());
+
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -130,6 +130,32 @@ pub enum PinState {
     High = 1,
 }
 
+/// Contact phase for one force/torque sample. Contact-rich transfer fails
+/// first on missing contact observability, so the phase travels with the
+/// data even though no backend produces it yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContactPhase {
+    NonContact,
+    PreContact,
+    Contact,
+}
+
+/// One force/torque sample with contact phase.
+///
+/// Schema-only today: every backend returns synthetic data or nothing, so
+/// there is deliberately NO `read_force` on `SensorManager` yet — adding the
+/// reader without a real sensor would fabricate contact data, the exact
+/// failure this schema exists to prevent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForceSample {
+    pub timestamp: u64,
+    /// Newtons in the sensor frame.
+    pub force_n: [f32; 3],
+    /// Newton-meters in the sensor frame.
+    pub torque_nm: [f32; 3],
+    pub phase: ContactPhase,
+}
+
 /// Sensor Manager
 pub struct SensorManager {
     config: SensorConfig,
@@ -495,5 +521,19 @@ mod tests {
             .execute_actuator("move_forward", serde_json::json!({"speed": 0.5}))
             .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn force_sample_schema_roundtrips() {
+        let sample = ForceSample {
+            timestamp: 1,
+            force_n: [0.0, 0.0, -9.81],
+            torque_nm: [0.0, 0.0, 0.0],
+            phase: ContactPhase::Contact,
+        };
+        let back: ForceSample =
+            serde_json::from_str(&serde_json::to_string(&sample).unwrap()).unwrap();
+        assert_eq!(back.phase, ContactPhase::Contact);
+        assert_eq!(back.force_n[2], -9.81);
     }
 }

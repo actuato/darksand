@@ -1,0 +1,8 @@
+target/
+.git/
+.igris/
+.darksand/
+*.log
+.env
+.env.*
+missions/*.jsonl

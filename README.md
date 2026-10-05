@@ -126,10 +126,14 @@ let summary = darksand_safety::summarize_log("violations.jsonl")?;
 
 ## Honest stubs
 
-No hardware is claimed. Today: swarm transport is in-process, sensors are
-simulated, `gazebo`/`isaac_sim` are config names, fleet dashboard has no
-store, recovery/fleet paths are local-only or mock-gated, and containment is
-only enforced on Linux. See each crate's docs for the exact boundary.
+No hardware is claimed. Today: swarm transport is in-process (inbound
+`receive()`/`try_receive()` are unimplemented, so swarm signature verification
+never runs on real traffic), sensors are simulated with no force/tactile
+backend, `gazebo`/`isaac_sim` are config names, fleet dashboard has no store,
+recovery/fleet paths are local-only or mock-gated, containment is only
+enforced on Linux, and the Go `policy/` tree is an unbuilt reference (see
+`policy/README.md`) — the live policy plane is `darksand-policy`. See each
+crate's docs for the exact boundary.
 
 ## Roadmap
 

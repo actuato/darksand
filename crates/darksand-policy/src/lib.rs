@@ -319,11 +319,29 @@ fn bearer_tenant(headers: &HeaderMap, keys: &PolicyKeys) -> Result<Authed, Statu
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let key = auth.strip_prefix("Bearer ").unwrap_or("").trim();
-    keys.0
-        .get(key)
-        .map(|t| Authed { tenant: t.clone() })
+    let presented = auth.strip_prefix("Bearer ").unwrap_or("").trim();
+    // Constant-time comparison over all provisioned keys: no early exit on
+    // length or content, so key validity is not oracle-able via timing.
+    let mut authed: Option<String> = None;
+    for (stored_key, tenant) in &keys.0 {
+        if constant_time_eq(presented.as_bytes(), stored_key.as_bytes()) {
+            authed = Some(tenant.clone());
+        }
+    }
+    authed
+        .map(|tenant| Authed { tenant })
         .ok_or(StatusCode::UNAUTHORIZED)
+}
+
+/// Constant-time byte equality (lengths included in the comparison).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = (a.len() ^ b.len()) as u8;
+    for i in 0..a.len().max(b.len()) {
+        let x = *a.get(i).unwrap_or(&0);
+        let y = *b.get(i).unwrap_or(&0);
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
@@ -454,12 +472,63 @@ async fn verify_command(
         return Err(err(StatusCode::CONFLICT, "policy_command_replay"));
     }
 
+    // Amortized cleanup: each verified command sweeps expired nonces so the
+    // replay table cannot grow unboundedly. Best-effort; a failed sweep never
+    // fails the command it rode along with.
+    let _ = db.execute(
+        "DELETE FROM command_nonces WHERE expires_at < ?1",
+        params![now_ms],
+    );
+
     Ok(CommandAuth {
         signer_identity,
         key_version: key_version.to_string(),
         nonce: nonce.to_string(),
         command_hash,
     })
+}
+
+/// Delete consumed nonces past their replay-protection window.
+/// Returns the number of rows reaped. Exposed for admin maintenance and tests;
+/// the live path also sweeps amortized inside [`verify_command`].
+pub async fn prune_expired_nonces(state: &AppState) -> Result<usize> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let db = state.db.lock().await;
+    let deleted = db
+        .execute(
+            "DELETE FROM command_nonces WHERE expires_at < ?1",
+            params![now_ms],
+        )
+        .context("nonce prune failed")?;
+    Ok(deleted as usize)
+}
+
+/// The enforced read: the tenant's active, unexpired policy, if any.
+///
+/// Listing endpoints show everything (including expired rows) for audit, but
+/// enforcement decisions MUST go through here — an `expires_at` in the past
+/// means the policy no longer authorizes anything, however `active` reads.
+pub async fn active_policy(state: &AppState, tenant: &str) -> Result<Option<Policy>> {
+    let now = now_secs();
+    let db = state.db.lock().await;
+    let policy: Option<Policy> = db
+        .query_row(
+            &format!(
+                "SELECT {} FROM policies
+                  WHERE tenant_id = ?1 AND active = 1
+                    AND (expires_at IS NULL OR expires_at > ?2)
+                  ORDER BY updated_at DESC LIMIT 1",
+                POLICY_COLS
+            ),
+            params![tenant, now],
+            row_policy,
+        )
+        .optional()
+        .context("active policy lookup failed")?;
+    Ok(policy)
 }
 
 /// Verify a signed command, with a bootstrap exception: when the tenant has
@@ -1192,5 +1261,77 @@ mod tests {
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn constant_time_eq_basics() {
+        assert!(super::constant_time_eq(b"sekret", b"sekret"));
+        assert!(!super::constant_time_eq(b"sekret", b"sekreU"));
+        assert!(!super::constant_time_eq(b"short", b"much-longer-key"));
+        assert!(super::constant_time_eq(b"", b""));
+    }
+
+    #[tokio::test]
+    async fn prune_expired_nonces_reaps_only_past_rows() {
+        let state = test_state();
+        {
+            let db = state.db.lock().await;
+            db.execute(
+                "INSERT INTO command_nonces (tenant_id, key_version, action, nonce,
+                    command_hash, command_signature, actor_id, signer_identity,
+                    signed_at, expires_at, consumed_at)
+                 VALUES ('tenant-a','k','a','old','h','s','tenant-a','s',1,2,3),
+                        ('tenant-a','k','a','fresh','h','s','tenant-a','s',1,9223372036854775807,3)",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(super::prune_expired_nonces(&state).await.unwrap(), 1);
+        assert_eq!(super::prune_expired_nonces(&state).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn active_policy_honors_expiry() {
+        let state = test_state();
+        let sk = bootstrap_and_activate(&state).await;
+        let app = router(state.clone());
+
+        // Draft with an expiry already in the past, then activate it.
+        let past = 1i64;
+        let res = app
+            .clone()
+            .oneshot(signed_req(
+                Some(&sk),
+                "k1",
+                "POST",
+                "/v1/robotics/policies",
+                "draft",
+                "exp1",
+                serde_json::json!({
+                    "permit": true,
+                    "robot_mode": "supervised",
+                    "expires_at": past,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let res = app
+            .clone()
+            .oneshot(signed_req(
+                Some(&sk),
+                "k1",
+                "POST",
+                "/v1/robotics/policies/robotics-policy.v1/activate",
+                "activate",
+                "exp2",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Active row exists, but enforcement sees through the expiry.
+        assert!(super::active_policy(&state, TENANT).await.unwrap().is_none());
     }
 }

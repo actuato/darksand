@@ -216,8 +216,29 @@ impl FleetAgent {
                 .build()?
         };
 
-        // Load or generate Ed25519 keypair for hybrid contract
-        let key_path = format!(".darksand/fleet_{}_key", config.agent_id);
+        // Load or generate Ed25519 keypair for hybrid contract.
+        // Key directory defaults to `.darksand` (CWD-relative) and can be
+        // redirected via `DARKSAND_FLEET_KEY_DIR` (tests, CI, containers).
+        // The agent_id is sanitized to a filename stem so a crafted ID can
+        // never escape the key directory via path traversal.
+        let key_dir =
+            std::env::var("DARKSAND_FLEET_KEY_DIR").unwrap_or_else(|_| ".darksand".to_string());
+        let safe_id: String = config
+            .agent_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let key_path = format!(
+            "{}/fleet_{}_key",
+            key_dir.trim_end_matches('/'),
+            safe_id
+        );
         let keypair = crypto::FleetKeypair::load_or_generate(&key_path)?;
         info!(
             "Fleet keypair loaded/generated. Public key: {}",

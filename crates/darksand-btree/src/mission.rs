@@ -245,6 +245,24 @@ impl Mission {
         if self.name.is_empty() {
             tracing::debug!("mission has no name; proceeding (name is documentary)");
         }
+        // Duplicate node names make the costs table (keyed by name) ambiguous
+        // and audit paths non-unique: reject at load, not at 2 a.m.
+        // (Unnamed nodes are exempt: they cannot be costed or addressed.)
+        let index = self.index();
+        let mut seen = std::collections::HashSet::new();
+        for node in &index {
+            if node.name.is_empty() {
+                continue;
+            }
+            if !seen.insert(node.name.as_str()) {
+                anyhow::bail!("duplicate node name {:?} at {}", node.name, node.path);
+            }
+        }
+        for (name, cost) in &self.costs {
+            if !cost.is_finite() || *cost < 0.0 {
+                anyhow::bail!("cost for node {name:?} must be finite and >= 0, got {cost}");
+            }
+        }
         build_node(self.root)
     }
 
@@ -302,6 +320,22 @@ impl Mission {
                     obj.and_then(|m| m.get(&lit.key)) == Some(&lit.expected)
                 })
         })
+    }
+
+    /// True when the tree contains an unbounded `Repeat` (count `None`).
+    /// Such missions never terminate on their own: pair them with an executor
+    /// `max_ticks`/`deadline`, a `Timeout` ancestor, or external cancel —
+    /// otherwise the default unbounded executor runs forever.
+    pub fn has_unbounded_repeat(&self) -> bool {
+        fn walk(spec: &NodeSpec) -> bool {
+            match spec {
+                NodeSpec::Repeat { count: None, .. } => true,
+                _ => spec_children(spec)
+                    .iter()
+                    .any(|(child, _)| walk(child)),
+            }
+        }
+        walk(&self.root)
     }
 }
 
@@ -702,8 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn index_assigns_stable_paths() {
-        let m = Mission::parse(
+    fn index_assigns_stable_paths() {        let m = Mission::parse(
             r#"{"version": "darksand-mission.v1",
                 "root": {"type": "Sequence", "name": "m", "children": [
                     {"type": "Retry", "name": "r", "max_retries": 1,
@@ -727,5 +760,75 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn duplicate_names_rejected() {
+        let err = expect_err(
+            r#"{"version": "darksand-mission.v1",
+                "root": {"type": "Sequence", "name": "m", "children": [
+                    {"type": "SetBlackboard", "name": "dup", "key": "a", "value": 1},
+                    {"type": "SetBlackboard", "name": "dup", "key": "b", "value": 2}
+                ]}}"#,
+        );
+        assert!(err.contains("duplicate node name"), "got: {err}");
+    }
+
+    #[test]
+    fn negative_costs_rejected() {
+        // JSON has no Infinity/NaN literals, so only negativity is reachable
+        // from documents; non-finiteness is still guarded for programmatic
+        // Mission construction.
+        let err = expect_err(
+            r#"{"version": "darksand-mission.v1",
+                "costs": {"a": -1.0},
+                "root": {"type": "SetBlackboard", "name": "a", "key": "k", "value": 1}}"#,
+        );
+        assert!(err.contains("must be finite"), "got: {err}");
+    }
+
+    #[test]
+    fn unbounded_repeat_detected() {
+        let with_inf = Mission::parse(
+            r#"{"version": "darksand-mission.v1",
+                "root": {"type": "Repeat", "name": "r",
+                    "child": {"type": "SetBlackboard", "name": "a", "key": "k", "value": 1}}}"#,
+        )
+        .unwrap();
+        assert!(with_inf.has_unbounded_repeat());
+        let bounded = Mission::parse(
+            r#"{"version": "darksand-mission.v1",
+                "root": {"type": "Repeat", "name": "r", "count": 2,
+                    "child": {"type": "SetBlackboard", "name": "a", "key": "k", "value": 1}}}"#,
+        )
+        .unwrap();
+        assert!(!bounded.has_unbounded_repeat());
+    }
+
+    /// The shipped example mission carries a real header, executes to
+    /// Success, and its declared goal holds on the final blackboard —
+    /// i.e. this mission actually produces a Proof, not just a status.
+    #[tokio::test]
+    async fn flagship_mission_proves_its_goal() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../missions/wharf-inspection.json"
+        );
+        let doc = std::fs::read_to_string(path).unwrap();
+        let mission = Mission::parse(&doc).unwrap();
+        assert_eq!(mission.disposition, Disposition::Clear);
+        assert!(mission.unmatched_costs().is_empty());
+        assert!(!mission.has_unbounded_repeat());
+
+        let mut tree = mission_from_str(&doc).unwrap();
+        let mut ctx = crate::core::BTreeContext::new();
+        let result = crate::BTreeExecutor::new()
+            .execute(&mut *tree, &mut ctx)
+            .await
+            .unwrap();
+        assert!(result.is_success());
+        let snapshot = ctx.blackboard.snapshot().await;
+        let mission = Mission::parse(&doc).unwrap();
+        assert!(mission.goal_satisfied(&snapshot));
     }
 }

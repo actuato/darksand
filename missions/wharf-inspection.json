@@ -1,6 +1,24 @@
 {
   "version": "darksand-mission.v1",
   "name": "wharf-inspection",
+  "disposition": "Clear",
+  "optimality": "MinExpectedCost",
+  "costs": {
+    "init": 1.0,
+    "ensure-ready": 2.0,
+    "bounded-leg": 5.0,
+    "confirm": 1.0
+  },
+  "goal": {
+    "dnf": [
+      [
+        {
+          "key": "phase",
+          "expected": "done"
+        }
+      ]
+    ]
+  },
   "root": {
     "type": "Sequence",
     "name": "mission",

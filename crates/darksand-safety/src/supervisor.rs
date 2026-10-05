@@ -107,6 +107,19 @@ impl Supervisor {
         self
     }
 
+    /// Join the hash chain to an existing log instead of starting a fork.
+    ///
+    /// Call after construction when the supervisor restarts against a
+    /// persisted log: the next record chains from the log's last hash, so
+    /// `verify_log_chain` keeps passing across restarts. Missing/empty log
+    /// keeps the fresh (empty) chain; a corrupt log fails here, loudly.
+    pub fn recover_chain(&mut self) -> Result<(), String> {
+        let hash = ViolationRecord::last_hash_from_log(&self.config.log_path)
+            .map_err(|e| e.to_string())?;
+        self.config.last_hash = hash;
+        Ok(())
+    }
+
     /// Spawn a fresh worker process and attach it to a cgroup.
     fn spawn_worker(&mut self) -> Result<(), String> {
         let worker_bin = self
@@ -265,11 +278,13 @@ impl Supervisor {
     /// Sends `job` as a single JSON line to the worker's stdin and reads one JSON line
     /// from stdout. A hard timeout of `bounds.max_tick_ms` is applied.
     ///
-    /// On timeout the worker is SIGKILLed, a signed violation record is written, and a
-    /// fresh worker is spawned before returning `Err(ViolationKind::Time)`.
+    /// Violation kinds are exact, not bucketed: `Time` on timeout (worker
+    /// SIGKILLed, signed record written, fresh worker respawned),
+    /// `Infra` when the worker cannot even be spawned, `Malformed` when the
+    /// worker answers with unparsable output.
     pub async fn execute(&mut self, job: Value) -> Result<Value, ViolationKind> {
         if self.worker.is_none() {
-            self.spawn_worker().map_err(|_| ViolationKind::Cpu)?;
+            self.spawn_worker().map_err(|_| ViolationKind::Infra)?;
         }
 
         let job_bytes = {
@@ -297,8 +312,10 @@ impl Supervisor {
 
         match ipc_result {
             Ok(Ok(line)) if !line.trim().is_empty() => {
-                // Happy path: parse and return the result JSON.
-                serde_json::from_str::<Value>(line.trim()).map_err(|_| ViolationKind::Cpu)
+                // Happy path: parse and return the result JSON. Unparsable
+                // worker output is a distinct violation kind, not a timeout.
+                serde_json::from_str::<Value>(line.trim())
+                    .map_err(|_| ViolationKind::Malformed)
             }
             _ => {
                 // Timeout or IO error — kill, reap, record, respawn.
@@ -409,6 +426,45 @@ mod tests {
             cfg!(target_os = "linux")
         );
         assert_eq!(crate::cgroup::CGroup::is_enforced(), cfg!(target_os = "linux"));
+    }
+
+    #[test]
+    fn test_recover_chain_joins_existing_log() {
+        use crate::violation::ViolationRecord;
+        let log = std::env::temp_dir()
+            .join("darksand_sup_recover_test.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_file(&log);
+        // Fresh log: empty chain.
+        assert_eq!(ViolationRecord::last_hash_from_log(&log).unwrap(), "");
+        assert_eq!(
+            ViolationRecord::last_hash_from_log("/tmp/definitely-not-here-darksand.jsonl")
+                .unwrap(),
+            ""
+        );
+
+        // Write a record, then recover: next record chains from it.
+        let key = SigningKey::from_bytes(&[8u8; 32]);
+        let bounds = Bounds::new(50, 100);
+        let mut first = Supervisor::new(bounds.clone(), key, log.clone());
+        assert!(first.record_violation(ViolationKind::Time, serde_json::json!({})));
+        let head = ViolationRecord::last_hash_from_log(&log).unwrap();
+        assert!(!head.is_empty());
+
+        let key2 = SigningKey::from_bytes(&[8u8; 32]);
+        let mut second = Supervisor::new(bounds, key2, log.clone());
+        second.recover_chain().unwrap();
+        assert!(second.record_violation(ViolationKind::Cpu, serde_json::json!({})));
+        assert_eq!(ViolationRecord::last_hash_from_log(&log).unwrap(), second.config.last_hash);
+
+        // Full chain verifies across the restart.
+        let same = SigningKey::from_bytes(&[8u8; 32]);
+        assert!(crate::violation::verify_log_chain(&log, &same.verifying_key()).is_ok());
+        let wrong = SigningKey::from_bytes(&[9u8; 32]);
+        // Different key must NOT verify (proves the check is real).
+        assert!(crate::violation::verify_log_chain(&log, &wrong.verifying_key()).is_err());
+        let _ = std::fs::remove_file(&log);
     }
 
     /// Full supervisor round-trip test.

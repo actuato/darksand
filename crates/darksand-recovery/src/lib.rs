@@ -99,6 +99,15 @@ pub enum RecoveryOutcome {
 /// WAL-logged and crash-recoverable themselves.
 ///
 /// Requires the `ros2` feature and a live ROS2 node.
+///
+/// # Containment interlock (caller's duty)
+///
+/// These behaviors publish motion. They do NOT check the containment
+/// bridge's safe-idle flag themselves (they hold no bridge handle by
+/// design, keeping this crate free of bridge coupling). Callers MUST gate
+/// every recovery call on `is_safe_idle` / `ensure_not_halted` first —
+/// driving recovery into an asserted safe-idle is a safety violation, and
+/// the bridge's zero-velocity loop will fight it.
 #[cfg(feature = "ros2")]
 pub mod robot {
     use super::RecoveryOutcome;
