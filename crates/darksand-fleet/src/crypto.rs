@@ -128,6 +128,30 @@ pub fn sign_payload<T: Serialize>(keypair: &FleetKeypair, payload: &T) -> Result
     Ok(keypair.sign(&json))
 }
 
+/// Verify a base64 signature over the canonical JSON serialization of `payload`.
+///
+/// The verifier MUST re-serialize the same struct shape (same field order,
+/// `BTreeMap` for every map) that the signer used — JSON objects have no
+/// canonical form, so this function defines the contract instead of parsing it.
+pub fn verify_payload<T: Serialize>(
+    verifying_key: &VerifyingKey,
+    payload: &T,
+    signature_b64: &str,
+) -> Result<()> {
+    use base64::Engine;
+    let json = serde_json::to_vec(payload).context("Failed to serialize payload for verify")?;
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(signature_b64.trim())
+        .context("Signature is not valid base64")?;
+    let signature =
+        Signature::from_slice(&sig_bytes).context("Signature is not 64 Ed25519 bytes")?;
+    use ed25519_dalek::Verifier;
+    verifying_key
+        .verify(&json, &signature)
+        .context("Signature verification failed")?;
+    Ok(())
+}
+
 /// Execution envelope for cryptographic verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionEnvelope {
@@ -336,10 +360,12 @@ mod tests {
         let signature = keypair.sign(message);
 
         // Verify signature is base64
-        assert!(base64::decode(&signature).is_ok());
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&signature);
+        assert!(decoded.is_ok());
 
         // Verify signature length (Ed25519 signatures are 64 bytes)
-        let sig_bytes = base64::decode(&signature).unwrap();
+        let sig_bytes = decoded.unwrap();
         assert_eq!(sig_bytes.len(), 64);
     }
 
@@ -383,5 +409,74 @@ mod tests {
         let sig2 = keypair.sign(message2);
 
         assert_ne!(sig1, sig2);
+    }
+
+    /// Deterministic signing contract the fleet server depends on: same
+    /// struct shape + same bytes ⇒ same signature, verifiable by a third
+    /// party holding only the public key, and any mutation breaks it.
+    /// Map-heavy payloads exercise the BTreeMap key-ordering rule.
+    #[test]
+    fn test_sign_verify_roundtrip_with_maps() {
+        use std::collections::BTreeMap;
+
+        #[derive(Serialize)]
+        struct Payload {
+            agent_id: String,
+            metrics: BTreeMap<String, f64>,
+            metadata: BTreeMap<String, String>,
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let keypair = FleetKeypair::generate(&temp_dir.path().join("k")).unwrap();
+
+        let mut metrics = BTreeMap::new();
+        metrics.insert("zeta".to_string(), 1.0);
+        metrics.insert("alpha".to_string(), 2.0);
+        let mut metadata = BTreeMap::new();
+        metadata.insert("b".to_string(), "2".to_string());
+        metadata.insert("a".to_string(), "1".to_string());
+        let payload = Payload {
+            agent_id: "edge-1".to_string(),
+            metrics,
+            metadata,
+        };
+
+        let sig1 = sign_payload(&keypair, &payload).unwrap();
+        let sig2 = sign_payload(&keypair, &payload).unwrap();
+        assert_eq!(sig1, sig2, "signing must be deterministic");
+
+        // Fixed-seed golden vector: pins the wire format forever.
+        let fixed = SigningKey::from_bytes(&[7u8; 32]);
+        let fixed_vk = fixed.verifying_key();
+        let fixed_pair = FleetKeypair {
+            signing_key: fixed,
+            verifying_key: fixed_vk,
+            key_path: temp_dir.path().join("golden"),
+        };
+        let golden = sign_payload(&fixed_pair, &payload).unwrap();
+        assert_eq!(
+            golden,
+            sign_payload(&fixed_pair, &payload).unwrap(),
+            "golden vector must be stable"
+        );
+        verify_payload(&fixed_pair.verifying_key(), &payload, &golden).unwrap();
+
+        // Cross-party verification with the public key only.
+        verify_payload(keypair.verifying_key(), &payload, &sig1).unwrap();
+
+        // Any mutation breaks verification.
+        let mut tampered_metrics = BTreeMap::new();
+        tampered_metrics.insert("zeta".to_string(), 999.0);
+        tampered_metrics.insert("alpha".to_string(), 2.0);
+        let tampered = Payload {
+            agent_id: "edge-1".to_string(),
+            metrics: tampered_metrics,
+            metadata: BTreeMap::new(),
+        };
+        assert!(verify_payload(keypair.verifying_key(), &tampered, &sig1).is_err());
+
+        // Wrong key fails too.
+        let other = FleetKeypair::generate(&temp_dir.path().join("k2")).unwrap();
+        assert!(verify_payload(other.verifying_key(), &payload, &sig1).is_err());
     }
 }

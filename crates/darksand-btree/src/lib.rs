@@ -24,11 +24,12 @@ pub mod runtime {
 pub use executor::{BTreeExecutor, ExecutorConfig};
 pub use mission::{
     mission_from_file, mission_from_str, Disposition, GoalLiteral, GoalSpec, Mission, NodePath,
-    NodeSpec, Optimality,
+    NodeSpec, Optimality, RunProof,
 };
 pub use result::ExecutionResult;
 pub use wal::{
-    append_wal, mission_hash, read_wal, read_wal_tolerant, resume_mission_from_wal, WalEntry,
+    append_wal, mission_hash, read_wal, read_wal_tolerant, resume_mission_from_wal, verify_wal,
+    WalEntry, WalReport,
 };
 
 /// Commonly used types.
@@ -40,13 +41,13 @@ pub mod prelude {
         action::SetBlackboard,
         composite::{Parallel, ParallelPolicy, Selector, Sequence},
         condition::CheckBlackboard,
-        decorator::{Inverter, Repeat, Retry, Timeout},
+        decorator::{Inverter, Repeat, Retry, Timeout, Watchdog},
     };
     pub use crate::{BTreeExecutor, ExecutionResult, ExecutorConfig};
     pub use crate::{mission_from_file, mission_from_str, Mission, NodeSpec};
-    pub use crate::{Disposition, GoalLiteral, GoalSpec, NodePath, Optimality};
+    pub use crate::{Disposition, GoalLiteral, GoalSpec, NodePath, Optimality, RunProof};
     pub use crate::{append_wal, read_wal, resume_mission_from_wal, WalEntry};
-    pub use crate::{mission_hash, read_wal_tolerant};
+    pub use crate::{mission_hash, read_wal_tolerant, verify_wal, WalReport};
     pub use async_trait::async_trait;
     pub use std::sync::Arc;
 }

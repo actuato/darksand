@@ -20,7 +20,8 @@
 //! Supported `type` values mirror the live node inventory: `Sequence`,
 //! `Selector`, `Parallel` (`policy`: `"RequireAll"` | `"RequireOne"`),
 //! `Inverter`, `Repeat` (`count`, null = infinite), `Retry` (`max_retries`),
-//! `Timeout` (`timeout_ms`), `CheckBlackboard` (`key`, `expected`),
+//! `Timeout` (`timeout_ms`), `Watchdog` (`timeout_ms`,
+//! `max_consecutive_running`), `CheckBlackboard` (`key`, `expected`),
 //! `SetBlackboard` (`key`, `value`). ROS2 action nodes (`RosTopicPublish`,
 //! `RosTopicSubscribe`, `RosServiceCall`) require the `ros2` feature and are
 //! rejected with a clear error otherwise.
@@ -110,6 +111,28 @@ pub struct NodePath {
     pub name: String,
 }
 
+/// Proof of a mission run: terminal status plus goal verification.
+///
+/// A `Success` status alone is not a proof — the tree may have succeeded
+/// while the declared goal never held (or no goal was declared at all).
+/// `is_proof()` is true only when the run succeeded AND the goal holds on
+/// the final blackboard.
+#[derive(Debug, Clone)]
+pub struct RunProof {
+    pub status: crate::core::NodeStatus,
+    pub ticks: u64,
+    pub duration_ms: u64,
+    pub snapshot: serde_json::Value,
+    pub estimated_cost: f64,
+    pub goal_satisfied: bool,
+}
+
+impl RunProof {
+    pub fn is_proof(&self) -> bool {
+        self.status.is_success() && self.goal_satisfied
+    }
+}
+
 /// Declarative form of one BT node.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
@@ -159,6 +182,15 @@ pub enum NodeSpec {
         child: Box<NodeSpec>,
         #[serde(default = "default_timeout_ms")]
         timeout_ms: u64,
+    },
+    Watchdog {
+        #[serde(default)]
+        name: String,
+        child: Box<NodeSpec>,
+        #[serde(default = "default_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_watchdog_running")]
+        max_consecutive_running: u32,
     },
     CheckBlackboard {
         #[serde(default)]
@@ -225,6 +257,10 @@ fn default_timeout_ms() -> u64 {
     5_000
 }
 
+fn default_watchdog_running() -> u32 {
+    100
+}
+
 fn default_msg_type() -> String {
     "std_msgs/String".to_string()
 }
@@ -236,14 +272,23 @@ fn default_sub_timeout_ms() -> u64 {
 impl Mission {
     /// Validate the envelope and build the executable tree.
     pub fn build(self) -> Result<Box<dyn BTreeNode>> {
+        self.validate()?;
+        if self.name.is_empty() {
+            tracing::debug!("mission has no name; proceeding (name is documentary)");
+        }
+        build_node(self.root)
+    }
+
+    /// Run every static check without building: version, duplicate names,
+    /// cost-table sanity, and degenerate parameters that would silently
+    /// no-op at runtime. Both `from_str` and `build` call this, so linters
+    /// and the executor can never disagree about admissibility.
+    pub fn validate(&self) -> Result<()> {
         if self.version != "darksand-mission.v1" {
             anyhow::bail!(
                 "unsupported mission version {:?} (expected \"darksand-mission.v1\")",
                 self.version
             );
-        }
-        if self.name.is_empty() {
-            tracing::debug!("mission has no name; proceeding (name is documentary)");
         }
         // Duplicate node names make the costs table (keyed by name) ambiguous
         // and audit paths non-unique: reject at load, not at 2 a.m.
@@ -263,20 +308,55 @@ impl Mission {
                 anyhow::bail!("cost for node {name:?} must be finite and >= 0, got {cost}");
             }
         }
-        build_node(self.root)
+        // Degenerate parameters that silently no-op: a Repeat with count 0
+        // ticks nothing and reports Success; a Timeout of 0 trips before the
+        // child ever runs.
+        fn walk(spec: &NodeSpec) -> Result<()> {
+            match spec {
+                NodeSpec::Repeat {
+                    count: Some(0),
+                    name,
+                    ..
+                } => anyhow::bail!("Repeat {name:?} has count 0: never ticks its child"),
+                NodeSpec::Timeout {
+                    timeout_ms: 0,
+                    name,
+                    ..
+                } => anyhow::bail!("Timeout {name:?} has timeout_ms 0: trips immediately"),
+                NodeSpec::Watchdog {
+                    timeout_ms: 0,
+                    name,
+                    ..
+                } => anyhow::bail!("Watchdog {name:?} has timeout_ms 0: trips immediately"),
+                _ => Ok::<(), anyhow::Error>(()),
+            }?;
+            for (child, _) in spec_children(spec) {
+                walk(child)?;
+            }
+            Ok(())
+        }
+        walk(&self.root)
     }
 
     /// Validate the envelope without building (for linters and auditors).
     pub fn parse(s: &str) -> Result<Self> {
+        Self::from_str(s)
+    }
+
+    /// Parse a mission document, running full validation (version, duplicate
+    /// names, cost table, degenerate parameters).
+    pub fn from_str(s: &str) -> Result<Self> {
         let mission: Mission =
             serde_json::from_str(s).context("mission document is not valid JSON")?;
-        if mission.version != "darksand-mission.v1" {
-            anyhow::bail!(
-                "unsupported mission version {:?} (expected \"darksand-mission.v1\")",
-                mission.version
-            );
-        }
+        mission.validate()?;
         Ok(mission)
+    }
+
+    /// Load a mission document from a `.json` file, fully validated.
+    pub fn from_file(path: &str) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read mission file {path}"))?;
+        Self::from_str(&content)
     }
 
     /// Path-qualified index of every node in the mission (`root…`).
@@ -292,19 +372,98 @@ impl Mission {
         self.costs.values().sum()
     }
 
-    /// Cost-table names with no matching node `name` in the tree.
+    /// Cost-table names with no matching node `name` or node path.
+    /// Path-keyed entries (`root.children[0]`) take precedence in
+    /// [`Mission::cost_bound`] and are therefore matched, not missing.
     pub fn unmatched_costs(&self) -> Vec<String> {
         let index = self.index();
-        let names: std::collections::HashSet<&str> =
-            index.iter().map(|n| n.name.as_str()).collect();
+        let mut known = std::collections::HashSet::new();
+        for n in &index {
+            known.insert(n.name.as_str());
+            known.insert(n.path.as_str());
+        }
         let mut missing: Vec<String> = self
             .costs
             .keys()
-            .filter(|k| !names.contains(k.as_str()))
+            .filter(|k| !known.contains(k.as_str()))
             .cloned()
             .collect();
         missing.sort();
         missing
+    }
+
+    /// Named nodes (non-empty `name`) with no cost entry by name or path.
+    /// Cost the mission honestly: every uncovered node is an unpriced risk.
+    pub fn uncovered_nodes(&self) -> Vec<String> {
+        let index = self.index();
+        let mut out: Vec<String> = index
+            .iter()
+            .filter(|n| !n.name.is_empty())
+            .filter(|n| !self.costs.contains_key(&n.name) && !self.costs.contains_key(&n.path))
+            .map(|n| n.name.clone())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Structural cost bound for an optimality criterion.
+    ///
+    /// Walks the tree shape (not the flat table): `Sequence`/`Selector`
+    /// sum, `Parallel{RequireAll}` sums, `Parallel{RequireOne}` takes the
+    /// max, `Retry` prices `(max_retries+1)` attempts under
+    /// `MinWorstCaseCost` but a single attempt under `MinExpectedCost`
+    /// (first-try success), `Repeat{Some(n)}` prices `n` iterations, and an
+    /// unbounded `Repeat` prices `INFINITY`. Node cost resolves by path
+    /// first, then by name, else 0.0.
+    pub fn cost_bound(&self, optimality: Optimality) -> f64 {
+        fn cost_of(mission: &Mission, spec: &NodeSpec, path: &str, optimality: Optimality) -> f64 {
+            if let Some(c) = mission.costs.get(path) {
+                return *c;
+            }
+            match spec {
+                NodeSpec::Sequence { children, .. }
+                | NodeSpec::Selector { children, .. } => children
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| cost_of(mission, c, &format!("{path}.children[{i}]"), optimality))
+                    .sum(),
+                NodeSpec::Parallel { policy, children, .. } => {
+                    let parts: Vec<f64> = children
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| cost_of(mission, c, &format!("{path}.children[{i}]"), optimality))
+                        .collect();
+                    match policy {
+                        ParallelPolicySpec::RequireAll => parts.iter().sum(),
+                        ParallelPolicySpec::RequireOne => {
+                            parts.into_iter().fold(0.0, f64::max)
+                        }
+                    }
+                }
+                NodeSpec::Retry { child, max_retries, .. } => {
+                    let one = cost_of(mission, child, &format!("{path}.child"), optimality);
+                    match optimality {
+                        Optimality::MinExpectedCost => one,
+                        _ => one * (f64::from(*max_retries) + 1.0),
+                    }
+                }
+                NodeSpec::Repeat { child, count, .. } => match count {
+                    Some(n) => {
+                        cost_of(mission, child, &format!("{path}.child"), optimality)
+                            * f64::from(*n)
+                    }
+                    None => f64::INFINITY,
+                },
+                NodeSpec::Timeout { child, .. }
+                | NodeSpec::Inverter { child, .. }
+                | NodeSpec::Watchdog { child, .. } => {
+                    cost_of(mission, child, &format!("{path}.child"), optimality)
+                }
+                _ => mission.costs.get(spec_name(spec)).copied().unwrap_or(0.0),
+            }
+        }
+        cost_of(self, &self.root, "root", optimality)
     }
 
     /// True when any DNF conjunct holds against a blackboard snapshot.
@@ -337,6 +496,29 @@ impl Mission {
         }
         walk(&self.root)
     }
+
+    /// Execute this mission end-to-end and return a [`RunProof`].
+    ///
+    /// Builds the tree, runs it under `config`, then checks the declared
+    /// goal against the final blackboard. Callers MUST check `is_proof()`,
+    /// not just terminal status: without a satisfied goal there is no proof.
+    pub async fn run(&self, config: crate::executor::ExecutorConfig) -> Result<RunProof> {
+        let mut tree = self.clone().build()?;
+        let mut context = crate::core::BTreeContext::new();
+        let result = crate::executor::BTreeExecutor::with_config(config)
+            .execute(&mut *tree, &mut context)
+            .await?;
+        let snapshot = context.blackboard.snapshot().await;
+        let goal_satisfied = self.goal_satisfied(&snapshot);
+        Ok(RunProof {
+            status: result.status,
+            ticks: result.tick_count,
+            duration_ms: result.duration.as_millis() as u64,
+            snapshot,
+            estimated_cost: self.estimated_cost(),
+            goal_satisfied,
+        })
+    }
 }
 
 fn spec_type_name(spec: &NodeSpec) -> &'static str {
@@ -348,6 +530,7 @@ fn spec_type_name(spec: &NodeSpec) -> &'static str {
         NodeSpec::Repeat { .. } => "Repeat",
         NodeSpec::Retry { .. } => "Retry",
         NodeSpec::Timeout { .. } => "Timeout",
+        NodeSpec::Watchdog { .. } => "Watchdog",
         NodeSpec::CheckBlackboard { .. } => "CheckBlackboard",
         NodeSpec::SetBlackboard { .. } => "SetBlackboard",
         NodeSpec::RosTopicPublish { .. } => "RosTopicPublish",
@@ -365,6 +548,7 @@ fn spec_name(spec: &NodeSpec) -> &str {
         | NodeSpec::Repeat { name, .. }
         | NodeSpec::Retry { name, .. }
         | NodeSpec::Timeout { name, .. }
+        | NodeSpec::Watchdog { name, .. }
         | NodeSpec::CheckBlackboard { name, .. }
         | NodeSpec::SetBlackboard { name, .. }
         | NodeSpec::RosTopicPublish { name, .. }
@@ -385,7 +569,8 @@ fn spec_children(spec: &NodeSpec) -> Vec<(&NodeSpec, String)> {
         NodeSpec::Inverter { child, .. }
         | NodeSpec::Repeat { child, .. }
         | NodeSpec::Retry { child, .. }
-        | NodeSpec::Timeout { child, .. } => vec![(child.as_ref(), "child".to_string())],
+        | NodeSpec::Timeout { child, .. }
+        | NodeSpec::Watchdog { child, .. } => vec![(child.as_ref(), "child".to_string())],
         _ => vec![],
     }
 }
@@ -401,12 +586,186 @@ fn index_spec(spec: &NodeSpec, path: String, out: &mut Vec<NodePath>) {
     }
 }
 
+/// One static finding from [`Mission::lint`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum MissionLint {
+    /// A key is read (check, goal, subscription) but never written.
+    UnwrittenKey { key: String, read_at: Vec<String> },
+    /// A `Selector` branch after an infallible first child can never run.
+    UnreachableSibling { path: String },
+    /// A `Retry` whose child cannot fail: the retry budget is dead weight.
+    DeadRetry { path: String },
+    /// An `Inverter` over an infallible child: always `Failure`.
+    AlwaysFailingInverter { path: String },
+    /// A cost-table entry with no matching node.
+    UnmatchedCost { name: String },
+    /// An unbounded `Repeat`: needs an external bound to terminate.
+    UnboundedRepeat { path: String },
+    /// The mission is not `Clear`: recorded for auditors.
+    NonClearDisposition { disposition: Disposition },
+}
+
+impl Mission {
+    /// Look up a node spec by its [`NodePath`]-style path (`root…`).
+    pub fn node_at(&self, path: &str) -> Option<&NodeSpec> {
+        fn go<'a>(spec: &'a NodeSpec, here: &str, want: &str) -> Option<&'a NodeSpec> {
+            if here == want {
+                return Some(spec);
+            }
+            for (child, seg) in spec_children(spec) {
+                if let Some(found) = go(child, &format!("{here}.{seg}"), want) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        go(&self.root, "root", path)
+    }
+
+    /// Static pre-execution audit: key flow, unreachable branches, dead
+    /// retries, vacuous inverters, cost coverage, unbounded loops.
+    /// An empty vec means the mission is structurally sound (not that it
+    /// will succeed — that is what execution plus [`Mission::run`] proves).
+    pub fn lint(&self) -> Vec<MissionLint> {
+        fn infallible(spec: &NodeSpec) -> bool {
+            match spec {
+                NodeSpec::SetBlackboard { .. } => true,
+                NodeSpec::Sequence { children, .. } if children.is_empty() => true,
+                NodeSpec::Sequence { children, .. } => {
+                    children.iter().all(infallible)
+                }
+                NodeSpec::Selector { children, .. } => children
+                    .first()
+                    .is_some_and(infallible),
+                NodeSpec::Parallel { policy, children, .. } => match policy {
+                    ParallelPolicySpec::RequireAll => {
+                        children.iter().all(infallible)
+                    }
+                    ParallelPolicySpec::RequireOne => {
+                        children.iter().any(infallible)
+                    }
+                },
+                NodeSpec::Retry { child, .. } => infallible(child),
+                NodeSpec::Inverter { .. }
+                | NodeSpec::Repeat { .. }
+                | NodeSpec::Timeout { .. }
+                | NodeSpec::Watchdog { .. }
+                | NodeSpec::CheckBlackboard { .. }
+                | NodeSpec::RosTopicPublish { .. }
+                | NodeSpec::RosTopicSubscribe { .. }
+                | NodeSpec::RosServiceCall { .. } => false,
+            }
+        }
+        let mut out = Vec::new();
+        if self.disposition != Disposition::Clear {
+            out.push(MissionLint::NonClearDisposition {
+                disposition: self.disposition,
+            });
+        }
+        for name in self.unmatched_costs() {
+            out.push(MissionLint::UnmatchedCost { name });
+        }
+
+        // Key flow: written vs read.
+        fn writes(spec: &NodeSpec, acc: &mut Vec<String>) {
+            match spec {
+                NodeSpec::SetBlackboard { key, .. } => acc.push(key.clone()),
+                NodeSpec::RosTopicSubscribe { output_key, .. } => acc.push(output_key.clone()),
+                NodeSpec::RosServiceCall { output_key, .. } => acc.push(output_key.clone()),
+                _ => {}
+            }
+            for (child, _) in spec_children(spec) {
+                writes(child, acc);
+            }
+        }
+        fn reads(spec: &NodeSpec, path: &str, acc: &mut Vec<(String, String)>) {
+            match spec {
+                NodeSpec::CheckBlackboard { key, .. } => acc.push((key.clone(), path.to_string())),
+                _ => {}
+            }
+            for (child, seg) in spec_children(spec) {
+                reads(child, &format!("{path}.{seg}"), acc);
+            }
+        }
+        let mut written = Vec::new();
+        writes(&self.root, &mut written);
+        let mut read_sites = Vec::new();
+        reads(&self.root, "root", &mut read_sites);
+        if let Some(goal) = &self.goal {
+            for conjunct in &goal.dnf {
+                for lit in conjunct {
+                    read_sites.push((lit.key.clone(), "goal".to_string()));
+                }
+            }
+        }
+        for (key, _) in &read_sites {
+            if !written.contains(key) {
+                let sites: Vec<String> = read_sites
+                    .iter()
+                    .filter(|(k, _)| k == key)
+                    .map(|(_, p)| p.clone())
+                    .collect();
+                if !out.iter().any(|l| {
+                    matches!(l, MissionLint::UnwrittenKey { key: k, .. } if k == key)
+                }) {
+                    out.push(MissionLint::UnwrittenKey {
+                        key: key.clone(),
+                        read_at: sites,
+                    });
+                }
+            }
+        }
+
+        // Structural walk for unreachable/dead/vacuous/unbounded nodes.
+        fn walk(spec: &NodeSpec, path: &str, out: &mut Vec<MissionLint>) {
+            match spec {
+                NodeSpec::Selector { children, .. } => {
+                    if let Some(first) = children.first() {
+                        if infallible(first) {
+                            for (i, _) in children.iter().enumerate().skip(1) {
+                                out.push(MissionLint::UnreachableSibling {
+                                    path: format!("{path}.children[{i}]"),
+                                });
+                            }
+                        }
+                    }
+                }
+                NodeSpec::Retry { child, .. } => {
+                    if infallible(child) {
+                        out.push(MissionLint::DeadRetry {
+                            path: path.to_string(),
+                        });
+                    }
+                }
+                NodeSpec::Inverter { child, .. } => {
+                    if infallible(child) {
+                        out.push(MissionLint::AlwaysFailingInverter {
+                            path: path.to_string(),
+                        });
+                    }
+                }
+                NodeSpec::Repeat { count: None, .. } => {
+                    out.push(MissionLint::UnboundedRepeat {
+                        path: path.to_string(),
+                    });
+                }
+                _ => {}
+            }
+            for (child, seg) in spec_children(spec) {
+                walk(child, &format!("{path}.{seg}"), out);
+            }
+        }
+        walk(&self.root, "root", &mut out);
+        out
+    }
+}
+
 fn build_node(spec: NodeSpec) -> Result<Box<dyn BTreeNode>> {
     use crate::nodes::{
         action::SetBlackboard,
         composite::{Parallel, ParallelPolicy, Selector, Sequence},
         condition::CheckBlackboard,
-        decorator::{Inverter, Repeat, Retry, Timeout},
+        decorator::{Inverter, Repeat, Retry, Timeout, Watchdog},
     };
 
     fn display_name(given: &str, fallback: &str) -> String {
@@ -472,6 +831,20 @@ fn build_node(spec: NodeSpec) -> Result<Box<dyn BTreeNode>> {
                 name,
                 build_node(*child)?,
                 timeout_ms,
+            )))
+        }
+        NodeSpec::Watchdog {
+            name,
+            child,
+            timeout_ms,
+            max_consecutive_running,
+        } => {
+            let name = display_name(&name, "watchdog");
+            Ok(Box::new(Watchdog::new(
+                name,
+                build_node(*child)?,
+                timeout_ms,
+                max_consecutive_running,
             )))
         }
         NodeSpec::CheckBlackboard {
@@ -808,27 +1181,210 @@ mod tests {
     /// The shipped example mission carries a real header, executes to
     /// Success, and its declared goal holds on the final blackboard —
     /// i.e. this mission actually produces a Proof, not just a status.
+    /// Single file read: header, tree, and goal travel together.
     #[tokio::test]
     async fn flagship_mission_proves_its_goal() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../missions/wharf-inspection.json"
         );
-        let doc = std::fs::read_to_string(path).unwrap();
-        let mission = Mission::parse(&doc).unwrap();
+        let mission = Mission::from_file(path).unwrap();
         assert_eq!(mission.disposition, Disposition::Clear);
         assert!(mission.unmatched_costs().is_empty());
         assert!(!mission.has_unbounded_repeat());
 
-        let mut tree = mission_from_str(&doc).unwrap();
-        let mut ctx = crate::core::BTreeContext::new();
-        let result = crate::BTreeExecutor::new()
-            .execute(&mut *tree, &mut ctx)
+        let proof = mission
+            .run(crate::executor::ExecutorConfig::default())
             .await
             .unwrap();
-        assert!(result.is_success());
-        let snapshot = ctx.blackboard.snapshot().await;
-        let mission = Mission::parse(&doc).unwrap();
-        assert!(mission.goal_satisfied(&snapshot));
+        assert!(proof.is_proof());
+        assert_eq!(proof.snapshot["phase"], "done");
+    }
+
+    #[tokio::test]
+    async fn success_without_goal_is_not_proof() {
+        let mission = Mission::from_str(
+            r#"{"version": "darksand-mission.v1",
+                "goal": {"dnf": [[{"key": "phase", "expected": "done"}]]},
+                "root": {"type": "SetBlackboard", "name": "a", "key": "phase", "value": "running"}}"#,
+        )
+        .unwrap();
+        let proof = mission
+            .run(crate::executor::ExecutorConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(proof.status, crate::core::NodeStatus::Success);
+        assert!(!proof.goal_satisfied);
+        assert!(!proof.is_proof());
+    }
+
+    #[test]
+    fn degenerate_parameters_rejected() {
+        let err = expect_err(
+            r#"{"version": "darksand-mission.v1",
+                "root": {"type": "Repeat", "name": "r", "count": 0,
+                    "child": {"type": "SetBlackboard", "name": "a", "key": "k", "value": 1}}}"#,
+        );
+        assert!(err.contains("count 0"), "got: {err}");
+        let err = expect_err(
+            r#"{"version": "darksand-mission.v1",
+                "root": {"type": "Timeout", "name": "t", "timeout_ms": 0,
+                    "child": {"type": "SetBlackboard", "name": "a", "key": "k", "value": 1}}}"#,
+        );
+        assert!(err.contains("timeout_ms 0"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_names() {
+        let err = match Mission::parse(
+            r#"{"version": "darksand-mission.v1",
+                "root": {"type": "Sequence", "name": "m", "children": [
+                    {"type": "SetBlackboard", "name": "dup", "key": "a", "value": 1},
+                    {"type": "SetBlackboard", "name": "dup", "key": "b", "value": 2}
+                ]}}"#,
+        ) {
+            Ok(_) => panic!("expected parse to fail"),
+            Err(e) => format!("{e:?}"),
+        };
+        assert!(err.contains("duplicate node name"), "got: {err}");
+    }
+
+    #[test]
+    fn flagship_lints_clean() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../missions/wharf-inspection.json"
+        );
+        let mission = Mission::from_file(path).unwrap();
+        assert_eq!(mission.lint(), vec![]);
+    }
+
+    #[test]
+    fn lint_finds_unreachable_unwritten_and_vacuous() {
+        let mission = Mission::from_str(
+            r#"{"version": "darksand-mission.v1",
+                "goal": {"dnf": [[{"key": "never_written", "expected": 1}]]},
+                "root": {"type": "Sequence", "name": "m", "children": [
+                    {"type": "Selector", "name": "s", "children": [
+                        {"type": "SetBlackboard", "name": "a", "key": "x", "value": 1},
+                        {"type": "SetBlackboard", "name": "b", "key": "y", "value": 2}
+                    ]},
+                    {"type": "Inverter", "name": "i",
+                     "child": {"type": "SetBlackboard", "name": "c", "key": "z", "value": 3}}
+                ]}}"#,
+        )
+        .unwrap();
+        let lint = mission.lint();
+        assert!(
+            lint.contains(&MissionLint::UnreachableSibling {
+                path: "root.children[0].children[1]".to_string()
+            }),
+            "got: {lint:?}"
+        );
+        assert!(
+            lint.iter().any(|l| matches!(
+                l,
+                MissionLint::UnwrittenKey { key, .. } if key == "never_written"
+            )),
+            "got: {lint:?}"
+        );
+        assert!(
+            lint.contains(&MissionLint::AlwaysFailingInverter {
+                path: "root.children[1]".to_string()
+            }),
+            "got: {lint:?}"
+        );
+    }
+
+    #[test]
+    fn cost_bound_follows_tree_shape() {
+        let mission = Mission::from_str(
+            r#"{"version": "darksand-mission.v1",
+                "costs": {"a": 5.0, "b": 5.0, "c": 1.0},
+                "root": {"type": "Parallel", "name": "p", "policy": "RequireOne", "children": [
+                    {"type": "SetBlackboard", "name": "a", "key": "x", "value": 1},
+                    {"type": "Retry", "name": "r", "max_retries": 2,
+                     "child": {"type": "SetBlackboard", "name": "c", "key": "y", "value": 2}},
+                    {"type": "SetBlackboard", "name": "b", "key": "z", "value": 3}
+                ]}}"#,
+        )
+        .unwrap();
+        // RequireOne takes the max branch: max(5, 3x1, 5) = 5 under both criteria.
+        assert_eq!(mission.cost_bound(Optimality::MinExpectedCost), 5.0);
+        // Retry alone: expected prices one attempt, worst prices all three.
+        let retry = Mission::from_str(
+            r#"{"version": "darksand-mission.v1",
+                "costs": {"c": 1.0},
+                "root": {"type": "Retry", "name": "r", "max_retries": 2,
+                    "child": {"type": "SetBlackboard", "name": "c", "key": "y", "value": 2}}}"#,
+        )
+        .unwrap();
+        assert_eq!(retry.cost_bound(Optimality::MinExpectedCost), 1.0);
+        assert_eq!(retry.cost_bound(Optimality::MinWorstCaseCost), 3.0);
+        assert_eq!(retry.cost_bound(Optimality::RobustUnderNFailures), 3.0);
+    }
+
+    #[test]
+    fn path_keyed_cost_takes_precedence() {
+        let mission = Mission::from_str(
+            r#"{"version": "darksand-mission.v1",
+                "costs": {"a": 100.0, "root.children[0]": 4.0},
+                "root": {"type": "Sequence", "name": "m", "children": [
+                    {"type": "SetBlackboard", "name": "a", "key": "x", "value": 1}
+                ]}}"#,
+        )
+        .unwrap();
+        assert!(mission.unmatched_costs().is_empty());
+        assert_eq!(mission.cost_bound(Optimality::MinExpectedCost), 4.0);
+    }
+
+    #[test]
+    fn uncovered_nodes_lists_unpriced() {
+        let mission = Mission::from_str(
+            r#"{"version": "darksand-mission.v1",
+                "costs": {"priced": 1.0},
+                "root": {"type": "Sequence", "name": "m", "children": [
+                    {"type": "SetBlackboard", "name": "priced", "key": "x", "value": 1},
+                    {"type": "SetBlackboard", "name": "free", "key": "y", "value": 2}
+                ]}}"#,
+        )
+        .unwrap();
+        // "m" itself is also uncovered.
+        assert_eq!(mission.uncovered_nodes(), vec!["free".to_string(), "m".to_string()]);
+    }
+
+    #[test]
+    fn node_at_resolves_paths() {
+        let mission = Mission::from_str(
+            r#"{"version": "darksand-mission.v1",
+                "root": {"type": "Retry", "name": "r", "max_retries": 1,
+                    "child": {"type": "SetBlackboard", "name": "a", "key": "k", "value": 1}}}"#,
+        )
+        .unwrap();
+        assert!(mission.node_at("root").is_some());
+        assert!(mission.node_at("root.child").is_some());
+        assert!(mission.node_at("root.children[0]").is_none());
+    }
+
+    #[tokio::test]
+    async fn watchdog_parses_indexes_and_builds() {
+        let mission = Mission::from_str(
+            r#"{"version": "darksand-mission.v1",
+                "root": {"type": "Watchdog", "name": "w", "timeout_ms": 500,
+                    "max_consecutive_running": 5,
+                    "child": {"type": "SetBlackboard", "name": "a", "key": "k", "value": 1}}}"#,
+        )
+        .unwrap();
+        let paths: Vec<String> = mission
+            .index()
+            .into_iter()
+            .map(|n| n.path)
+            .collect();
+        assert_eq!(paths, vec!["root".to_string(), "root.child".to_string()]);
+        // Builds and ticks through to Success (child succeeds first tick).
+        let mut tree = mission.build().unwrap();
+        let mut ctx = BTreeContext::new();
+        let status = tree.tick(&mut ctx).await.unwrap();
+        assert_eq!(status, crate::core::NodeStatus::Success);
     }
 }

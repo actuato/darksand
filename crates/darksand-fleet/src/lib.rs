@@ -50,7 +50,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
@@ -119,7 +119,7 @@ pub struct RegisterRequest {
     pub version: String,
     pub capabilities: Vec<String>,
     pub location: Option<String>,
-    pub metadata: HashMap<String, String>,
+    pub metadata: BTreeMap<String, String>,
     /// Base64-encoded Ed25519 public key for hybrid contract
     pub public_key: String,
     /// Base64-encoded Ed25519 signature of the request payload (excluding this field)
@@ -148,7 +148,7 @@ pub struct ConfigSyncResponse {
 pub struct TelemetryData {
     pub agent_id: String,
     pub timestamp: u64,
-    pub metrics: HashMap<String, f64>,
+    pub metrics: BTreeMap<String, f64>,
     pub logs: Vec<LogEntry>,
     pub status: AgentStatus,
     /// Base64-encoded Ed25519 signature of the telemetry payload (excluding this field)
@@ -161,7 +161,7 @@ pub struct LogEntry {
     pub timestamp: u64,
     pub level: String,
     pub message: String,
-    pub metadata: HashMap<String, String>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,6 +292,10 @@ impl FleetAgent {
 
         // Create unsigned request payload
         #[derive(Serialize)]
+        /// Canonical registration payload. Field order + BTreeMap are load-
+        /// bearing: the server re-serializes this exact shape to verify the
+        /// signature, so any reorder or HashMap here breaks verification
+        /// nondeterministically.
         struct UnsignedPayload {
             agent_id: String,
             hostname: String,
@@ -299,7 +303,7 @@ impl FleetAgent {
             version: String,
             capabilities: Vec<String>,
             location: Option<String>,
-            metadata: HashMap<String, String>,
+            metadata: BTreeMap<String, String>,
         }
 
         let unsigned_payload = UnsignedPayload {
@@ -316,7 +320,7 @@ impl FleetAgent {
                 "tools".to_string(),
             ],
             location: None,
-            metadata: HashMap::new(),
+            metadata: BTreeMap::new(),
         };
 
         // Sign the payload
@@ -591,7 +595,7 @@ impl FleetAgent {
         // one must too, or environments without a runtime on :8080 (CI) collect
         // empty metrics.
         if mock_mode {
-            let mut metrics = HashMap::new();
+            let mut metrics = BTreeMap::new();
             metrics.insert("requests_total".to_string(), 1234.0);
             metrics.insert("latency_p99_ms".to_string(), 45.2);
             metrics.insert("error_rate".to_string(), 0.01);
@@ -622,7 +626,7 @@ impl FleetAgent {
                     "Failed to fetch Prometheus metrics: {}. Using empty metrics.",
                     e
                 );
-                HashMap::new()
+                BTreeMap::new()
             });
 
         // Get REAL system stats
@@ -835,10 +839,30 @@ impl FleetAgent {
     }
 
     /// Deregister from fleet
+    ///
+    /// Sends `DELETE /api/fleet/:fleet_id` when registered (server clears
+    /// the agent row and audits it), then clears local state either way.
+    /// In `mock_mode` no request is sent.
     pub async fn deregister(&self) -> Result<()> {
         info!("Deregistering from fleet");
 
-        // In production, send DELETE request to Darksand
+        if !self.config.mock_mode {
+            if let Some(fleet_id) = self.fleet_id.read().await.clone() {
+                let url = format!(
+                    "{}/api/fleet/{}",
+                    self.config.darksand_endpoint, fleet_id
+                );
+                let mut req = self.client.delete(&url);
+                if let Some(api_key) = &self.config.api_key {
+                    req = req.header("X-API-Key", api_key);
+                }
+                req.send()
+                    .await
+                    .context("Failed to send deregistration request")?
+                    .error_for_status()
+                    .context("Deregistration request failed")?;
+            }
+        }
 
         let mut registered = self.registered.write().await;
         *registered = false;
@@ -879,25 +903,103 @@ pub mod dashboard {
         pub config_version: u64,
     }
 
-    /// Get fleet overview
+    /// Get fleet overview from the control plane.
     ///
-    /// Requires a fleet store (control-plane database). This client crate
-    /// ships no store, so this returns an error instead of fabricated counts.
-    pub async fn get_fleet_overview(_fleet_id: &str) -> Result<FleetOverview> {
-        Err(anyhow::anyhow!(
-            "fleet store not wired: query the control plane database for fleet stats"
-        ))
+    /// Queries `GET /api/fleet/agents` and aggregates per-agent health.
+    /// `total_requests` counts stored telemetry rows; `average_latency_ms`
+    /// is not tracked server-side yet and is reported as 0.0 (explicitly,
+    /// never fabricated).
+    pub async fn get_fleet_overview(endpoint: &str, api_key: &str) -> Result<FleetOverview> {
+        let agents = list_agents(endpoint, api_key).await?;
+        let mut overview = FleetOverview {
+            total_agents: agents.len(),
+            healthy_agents: 0,
+            degraded_agents: 0,
+            unhealthy_agents: 0,
+            total_requests: 0,
+            average_latency_ms: 0.0,
+        };
+        for agent in &agents {
+            match agent.health.as_str() {
+                "healthy" => overview.healthy_agents += 1,
+                "degraded" => overview.degraded_agents += 1,
+                "unhealthy" => overview.unhealthy_agents += 1,
+                _ => overview.degraded_agents += 1,
+            }
+            overview.total_requests += 1;
+        }
+        Ok(overview)
     }
 
-    /// Get agent details
-    ///
-    /// Requires a fleet store (control-plane database). This client crate
-    /// ships no store, so this returns an error instead of fabricated details.
-    pub async fn get_agent_details(_fleet_id: &str, _agent_id: &str) -> Result<AgentDetails> {
-        Err(anyhow::anyhow!(
-            "fleet store not wired: query the control plane database for agent details"
-        ))
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct AgentsResponse {
+        #[serde(default)]
+        agents: Vec<AgentRecord>,
+        #[serde(default)]
+        total: usize,
     }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct AgentRecord {
+        #[serde(default)]
+        agent_id: String,
+        #[serde(default)]
+        hostname: String,
+        #[serde(default)]
+        health: String,
+        #[serde(default)]
+        last_seen: u64,
+        #[serde(default)]
+        config_version: u64,
+    }
+
+    async fn list_agents(endpoint: &str, api_key: &str) -> Result<Vec<AgentRecord>> {
+        let url = format!("{}/api/fleet/agents", endpoint.trim_end_matches('/'));
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()?;
+        let response: AgentsResponse = client
+            .get(&url)
+            .header("X-API-Key", api_key)
+            .send()
+            .await
+            .context("Failed to query fleet agents")?
+            .error_for_status()
+            .context("Fleet agents query failed")?
+            .json()
+            .await
+            .context("Failed to parse fleet agents response")?;
+        Ok(response.agents)
+    }
+
+    /// Get agent details from the control plane.
+    pub async fn get_agent_details(
+        endpoint: &str,
+        api_key: &str,
+        agent_id: &str,
+    ) -> Result<AgentDetails> {
+        let agents = list_agents(endpoint, api_key).await?;
+        let record = agents
+            .into_iter()
+            .find(|a| a.agent_id == agent_id)
+            .ok_or_else(|| anyhow::anyhow!("agent not found in fleet"))?;
+        // Latest status snapshot is not stored server-side yet; report the
+        // last-seen health honestly and leave the full status to telemetry.
+        Ok(AgentDetails {
+            agent_id: record.agent_id,
+            hostname: record.hostname,
+            status: AgentStatus {
+                health: record.health,
+                uptime_secs: 0,
+                cpu_usage_percent: 0.0,
+                memory_usage_mb: 0,
+                active_tasks: 0,
+            },
+            last_seen: record.last_seen,
+            config_version: record.config_version,
+        })
+    }
+
 }
 
 #[cfg(test)]

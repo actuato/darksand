@@ -3,8 +3,10 @@
 //! Provides virtual environments and chaos testing for AI agents.
 
 pub mod manifest;
+pub mod sim2real;
 
 pub use manifest::SimManifest;
+pub use sim2real::{replay_error, spearman_rank_correlation, ReplayError, TransferReport};
 
 use anyhow::Result;
 use rand::Rng;

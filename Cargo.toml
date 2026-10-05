@@ -9,6 +9,7 @@ members = [
     "crates/darksand-simulation",
     "crates/darksand-btree",
     "crates/darksand-policy",
+    "crates/darksand-config",
 ]
 resolver = "2"
 

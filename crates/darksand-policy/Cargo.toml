@@ -24,7 +24,11 @@ hex = "0.4"
 ed25519-dalek = { workspace = true }
 rusqlite = { workspace = true }
 rand = { workspace = true }
+uuid = { workspace = true }
+darksand-fleet = { path = "../darksand-fleet" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true }
+reqwest = { workspace = true }
+tempfile = "3"

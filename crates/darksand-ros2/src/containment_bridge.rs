@@ -28,9 +28,11 @@
 
 use crate::Ros2Node;
 use ed25519_dalek::SigningKey;
-use darksand_safety::{ContainmentEvent, RoboticsContext, ViolationEventBus, ViolationRecord};
+use darksand_safety::{
+    ContainmentEvent, RoboticsContext, ViolationEventBus, ViolationKind, ViolationRecord,
+};
 use std::sync::{
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
     Arc,
 };
 use std::time::Duration;
@@ -82,6 +84,9 @@ pub struct HaltOutcome {
     /// Answers "how close did this halt come to missing its deadline" without
     /// needing sensor-side STL instrumentation.
     pub margin_ms: i64,
+    /// Monotonic halt number (first halt is 1). Lets operators order outcomes
+    /// when violations arrive faster than the 3 s zero-vel loop completes.
+    pub halt_seq: u64,
 }
 
 /// Halt critical-path latency histogram (steps 1–4, milliseconds).
@@ -132,6 +137,32 @@ impl HaltMetrics {
     }
 }
 
+/// Quantitative robustness of zero-velocity coverage over a halt window.
+///
+/// Answers "did `/cmd_vel` stay covered for the whole 3 s?" as a number, not
+/// a boolean: the window is divided into 100 ms cells (the publish cadence)
+/// and robustness is the minimum per-cell surplus over the required single
+/// publish. `>= 0.0` means every cell was covered (margin included);
+/// `< 0.0` means at least one cell went uncovered (e.g. a 500 ms stall).
+/// Pure function over recorded timestamps — feed it the loop's publish times
+/// in postmortem or live evaluation.
+pub fn zero_vel_coverage_robustness(publish_timestamps_ms: &[u64], window_ms: u64) -> f64 {
+    if window_ms == 0 {
+        return f64::NEG_INFINITY;
+    }
+    let cells = ((window_ms + 99) / 100) as usize;
+    if cells == 0 {
+        return f64::NEG_INFINITY;
+    }
+    let mut counts = vec![0u32; cells];
+    for &t in publish_timestamps_ms {
+        if t < window_ms {
+            counts[(t / 100) as usize] += 1;
+        }
+    }
+    counts.into_iter().min().unwrap_or(0) as f64 - 1.0
+}
+
 /// Bridge between the containment supervisor and ROS2 actuator subsystems.
 ///
 /// Created at startup via [`ContainmentBridge::new`]. Run as a long-lived
@@ -154,6 +185,10 @@ pub struct ContainmentBridge {
     /// Outcome of the most recent halt (critical-path fields set
     /// synchronously; zero-vel counts filled when the 3 s loop completes).
     last_outcome: Arc<RwLock<Option<HaltOutcome>>>,
+    /// Monotonic halt sequence number. Stamps every `HaltOutcome` so a slow
+    /// zero-vel loop from an older halt can never overwrite a newer halt's
+    /// outcome. Starts at 0; first halt is 1.
+    halt_seq: Arc<AtomicU64>,
     /// Critical-path latency samples across all halts (bounded ring).
     halt_metrics: Arc<tokio::sync::Mutex<HaltMetrics>>,
 }
@@ -199,6 +234,7 @@ impl ContainmentBridge {
             zero_vel_ok_total: Arc::new(AtomicU32::new(0)),
             zero_vel_err_total: Arc::new(AtomicU32::new(0)),
             last_outcome: Arc::new(RwLock::new(None)),
+            halt_seq: Arc::new(AtomicU64::new(0)),
             halt_metrics: Arc::new(tokio::sync::Mutex::new(HaltMetrics::default())),
         };
         (bridge, idle_rx)
@@ -312,7 +348,7 @@ impl ContainmentBridge {
                          applying unconditional emergency halt",
                         n
                     );
-                    self.apply_emergency_halt_unconditional().await;
+                    self.apply_emergency_halt_unconditional(n).await;
                 }
             }
         }
@@ -326,6 +362,7 @@ impl ContainmentBridge {
     async fn handle_violation(&mut self, record: &ViolationRecord) {
         let start = std::time::Instant::now();
         self.halts_handled.fetch_add(1, Ordering::Relaxed);
+        let seq = self.halt_seq.fetch_add(1, Ordering::Relaxed) + 1;
 
         // Step 1 — Capture robotics state BEFORE any action changes it.
         let (goal_id, pose, pre_halt_velocity) = self.capture_robotics_state().await;
@@ -343,35 +380,39 @@ impl ContainmentBridge {
         // Publishes zero Twist to /cmd_vel every 100 ms for 3 s (30 iterations).
         // Runs independently of Nav2 cancel result. Per-publish results are
         // counted (not just warned) so a dead `/cmd_vel` path is observable.
+        // Each loop owns PRIVATE counters folded into the lifetime totals on
+        // completion: concurrent loops can never inflate each other's outcome.
         const ZERO_VEL_ITERS: u32 = 30;
         {
             let node_clone = Arc::clone(&self.node);
             let ok_total = Arc::clone(&self.zero_vel_ok_total);
             let err_total = Arc::clone(&self.zero_vel_err_total);
             let outcome_slot = Arc::clone(&self.last_outcome);
-            // Snapshot counters so this halt's counts are isolated from any
-            // concurrent halt loop.
-            let ok_base = ok_total.load(Ordering::Relaxed);
-            let err_base = err_total.load(Ordering::Relaxed);
             tokio::spawn(async move {
                 info!("Zero-velocity loop started (30 × 100 ms = 3 s)");
+                let mut ok = 0u32;
+                let mut errs = 0u32;
                 for _ in 0..ZERO_VEL_ITERS {
                     if node_clone.publish_zero_velocity().await.is_ok() {
+                        ok += 1;
                         ok_total.fetch_add(1, Ordering::Relaxed);
                     } else {
+                        errs += 1;
                         err_total.fetch_add(1, Ordering::Relaxed);
                         warn!("Zero-velocity publish error (counted, continuing loop)");
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 info!("Zero-velocity loop complete");
-                // Fill in this halt's zero-vel counts on the stored outcome.
-                let ok = ok_total.load(Ordering::Relaxed).saturating_sub(ok_base);
-                let errs = err_total.load(Ordering::Relaxed).saturating_sub(err_base);
+                // Fill in this halt's zero-vel counts, but never overwrite a
+                // newer halt's outcome with this older loop's numbers.
                 let mut guard = outcome_slot.write().await;
-                if let Some(o) = guard.as_mut() {
-                    o.zero_vel_ok = ok;
-                    o.zero_vel_errors = errs;
+                let newer_present = guard.as_ref().is_some_and(|o| o.halt_seq > seq);
+                if !newer_present {
+                    if let Some(o) = guard.as_mut() {
+                        o.zero_vel_ok = ok;
+                        o.zero_vel_errors = errs;
+                    }
                 }
             });
         }
@@ -420,44 +461,63 @@ impl ContainmentBridge {
             budget_exceeded,
             log_ok,
             margin_ms: 50 - u64::try_from(critical_path_ms).unwrap_or(u64::MAX) as i64,
+            halt_seq: seq,
         });
     }
 
-    /// Apply emergency halt with no associated violation record (lag recovery path).
-    async fn apply_emergency_halt_unconditional(&mut self) {
+    /// Apply emergency halt when violation events were missed (lag path).
+    ///
+    /// A lagged bus means violations fired that this bridge never saw. The
+    /// halt still executes, AND a signed `Infra` record is now appended naming
+    /// the missed count — previously this path left no audit trace at all.
+    async fn apply_emergency_halt_unconditional(&mut self, missed: u64) {
         let start = std::time::Instant::now();
         warn!("Unconditional emergency halt triggered (lag recovery)");
         self.halts_handled.fetch_add(1, Ordering::Relaxed);
+        let seq = self.halt_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let cancel_ok = self.cancel_active_goal_timed(20).await;
         let node_clone = Arc::clone(&self.node);
         let ok_total = Arc::clone(&self.zero_vel_ok_total);
         let err_total = Arc::clone(&self.zero_vel_err_total);
         let outcome_slot = Arc::clone(&self.last_outcome);
-        let ok_base = ok_total.load(Ordering::Relaxed);
-        let err_base = err_total.load(Ordering::Relaxed);
         tokio::spawn(async move {
+            let mut ok = 0u32;
+            let mut errs = 0u32;
             for _ in 0..30u32 {
                 if node_clone.publish_zero_velocity().await.is_ok() {
+                    ok += 1;
                     ok_total.fetch_add(1, Ordering::Relaxed);
                 } else {
+                    errs += 1;
                     err_total.fetch_add(1, Ordering::Relaxed);
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            let ok = ok_total.load(Ordering::Relaxed).saturating_sub(ok_base);
-            let errs = err_total.load(Ordering::Relaxed).saturating_sub(err_base);
             let mut guard = outcome_slot.write().await;
-            if let Some(o) = guard.as_mut() {
-                o.zero_vel_ok = ok;
-                o.zero_vel_errors = errs;
+            let newer_present = guard.as_ref().is_some_and(|o| o.halt_seq > seq);
+            if !newer_present {
+                if let Some(o) = guard.as_mut() {
+                    o.zero_vel_ok = ok;
+                    o.zero_vel_errors = errs;
+                }
             }
         });
         let _ = self.idle_tx.send(true);
         let lag_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.halt_metrics.lock().await.record(lag_ms);
-        // No robotics record exists for the lag path (no original violation);
-        // still publish an outcome so operators can see cancel/idle state.
-        // log_ok=false distinguishes this from a fully recorded halt.
+        // Signed audit trace for the missed violations themselves.
+        let record = ViolationRecord::new(
+            ViolationKind::Infra,
+            serde_json::json!({"reason": "bridge_lag", "missed": missed}),
+            self.last_hash.clone(),
+            &self.signing_key,
+        );
+        let log_ok = record.append_to_log(&self.log_path).is_ok();
+        if log_ok {
+            self.last_hash = record.hash.clone();
+        } else {
+            error!("Lag-halt audit record could not be persisted");
+        }
         *self.last_outcome.write().await = Some(HaltOutcome {
             cancel_ok,
             zero_vel_attempted: 30,
@@ -465,8 +525,9 @@ impl ContainmentBridge {
             zero_vel_errors: 0,
             idle_asserted: true,
             budget_exceeded: false,
-            log_ok: false,
+            log_ok,
             margin_ms: 50 - lag_ms as i64,
+            halt_seq: seq,
         });
     }
 
@@ -1242,5 +1303,101 @@ mod tests {
 
         let _ = std::fs::remove_file(&log);
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// Two violations ~150 ms apart: per-halt counts stay isolated (each
+    /// outcome sums to exactly 30) and the newer halt wins `last_outcome`.
+    #[tokio::test]
+    async fn overlapping_halts_keep_isolated_counts() {
+        let node = make_node().await;
+        let bus = ViolationEventBus::new();
+        let log = test_log();
+        let _ = std::fs::remove_file(&log);
+
+        let (bridge, _idle_rx) = ContainmentBridge::new(
+            &bus,
+            Arc::clone(&node),
+            test_key(),
+            log.clone(),
+            String::new(),
+        );
+        let outcome_slot = Arc::clone(&bridge.last_outcome);
+        tokio::spawn(bridge.run());
+        tokio::time::sleep(Duration::from_millis(15)).await;
+
+        bus.emit_violation(make_violation(""));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        bus.emit_violation(make_violation(""));
+        // Both 3 s loops must finish: 150 ms offset + 3000 ms + margin.
+        tokio::time::sleep(Duration::from_millis(3300)).await;
+
+        {
+            let outcome = outcome_slot.read().await;
+            let o = outcome.as_ref().expect("outcome must be recorded");
+            assert_eq!(o.halt_seq, 2, "newer halt must win last_outcome");
+            assert_eq!(
+                o.zero_vel_ok + o.zero_vel_errors,
+                30,
+                "no phantom successes from the sibling loop"
+            );
+        }
+
+        let _ = std::fs::remove_file(&log);
+    }
+
+    /// The lag path signs its own audit record so missed violations are not
+    /// silent holes in the chain.
+    #[tokio::test]
+    async fn lag_halt_writes_infra_audit_record() {
+        let node = make_node().await;
+        let bus = ViolationEventBus::new();
+        let log = test_log();
+        let _ = std::fs::remove_file(&log);
+
+        let (mut bridge, _idle_rx) = ContainmentBridge::new(
+            &bus,
+            Arc::clone(&node),
+            test_key(),
+            log.clone(),
+            String::new(),
+        );
+        bridge.apply_emergency_halt_unconditional(3).await;
+
+        let content = std::fs::read_to_string(&log).unwrap();
+        let records: Vec<ViolationRecord> = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(records.len(), 1);
+        assert!(matches!(
+            records[0].violation_kind,
+            ViolationKind::Infra
+        ));
+        assert_eq!(records[0].context["reason"], "bridge_lag");
+        assert_eq!(records[0].context["missed"], 3);
+
+        let _ = std::fs::remove_file(&log);
+    }
+
+    #[test]
+    fn zero_vel_coverage_robustness_grades_windows() {
+        // Even 100 ms spacing over 3 s: covered, zero margin.
+        let even: Vec<u64> = (0..30).map(|i| i * 100).collect();
+        assert_eq!(zero_vel_coverage_robustness(&even, 3000), 0.0);
+        // Doubled publishes: +1 margin everywhere.
+        let mut dense = even.clone();
+        dense.extend(even.iter().map(|t| t + 50));
+        assert_eq!(zero_vel_coverage_robustness(&dense, 3000), 1.0);
+        // A 500 ms stall kills five cells.
+        let gapped: Vec<u64> = even.into_iter().filter(|t| *t < 1000 || *t >= 1500).collect();
+        assert!(zero_vel_coverage_robustness(&gapped, 3000) < 0.0);
+        // Nothing published: violated, not unknown.
+        assert!(zero_vel_coverage_robustness(&[], 3000) < 0.0);
+        // Degenerate window: never satisfiable.
+        assert_eq!(
+            zero_vel_coverage_robustness(&[0], 0),
+            f64::NEG_INFINITY
+        );
     }
 }

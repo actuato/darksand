@@ -273,6 +273,26 @@ impl Supervisor {
         cfg!(target_os = "linux")
     }
 
+    /// Classify a finished worker IPC exchange into its exact violation kind.
+    ///
+    /// Pure function so the audit taxonomy is unit-testable without spawning
+    /// a worker: only an elapsed deadline is `Time`; broken pipes, EOF, and
+    /// empty answers are `Infra`; successfully-read but unparsable output is
+    /// `Malformed` (parse itself happens in `execute`).
+    fn classify_ipc(
+        timed_out: bool,
+        outcome: &std::io::Result<String>,
+    ) -> Option<ViolationKind> {
+        if timed_out {
+            return Some(ViolationKind::Time);
+        }
+        match outcome {
+            Err(_) => Some(ViolationKind::Infra),
+            Ok(line) if line.trim().is_empty() => Some(ViolationKind::Infra),
+            Ok(_) => None,
+        }
+    }
+
     /// Execute a job in the worker process.
     ///
     /// Sends `job` as a single JSON line to the worker's stdin and reads one JSON line
@@ -296,32 +316,52 @@ impl Supervisor {
         let duration = Duration::from_millis(self.config.bounds.max_tick_ms);
 
         // Borrow stdin/stdout from the worker for the IPC future.
+        // `timed_out` distinguishes a deadline overrun (Time) from a dead
+        // worker pipe (Infra); the happy path parses below (Malformed).
+        let mut timed_out = false;
         let ipc_result = {
             let w = self.worker.as_mut().unwrap();
             let stdin = &mut w.stdin;
             let stdout = &mut w.stdout;
-            timeout(duration, async {
+            let inner = timeout(duration, async {
                 stdin.write_all(job_bytes.as_bytes()).await?;
                 stdin.flush().await?;
                 let mut line = String::new();
                 stdout.read_line(&mut line).await?;
                 std::io::Result::Ok(line)
             })
-            .await
+            .await;
+            match inner {
+                Err(_) => {
+                    timed_out = true;
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "worker tick deadline exceeded",
+                    ))
+                }
+                Ok(r) => r,
+            }
         };
 
         match ipc_result {
-            Ok(Ok(line)) if !line.trim().is_empty() => {
+            Ok(line) if !line.trim().is_empty() => {
                 // Happy path: parse and return the result JSON. Unparsable
                 // worker output is a distinct violation kind, not a timeout.
                 serde_json::from_str::<Value>(line.trim())
                     .map_err(|_| ViolationKind::Malformed)
             }
-            _ => {
-                // Timeout or IO error — kill, reap, record, respawn.
+            other => {
+                // Timeout, dead pipe, or empty answer — kill, reap, record
+                // the exact kind, respawn.
+                let probe: std::io::Result<String> = match &other {
+                    Ok(line) => Ok(line.clone()),
+                    Err(e) => Err(std::io::Error::new(e.kind(), "worker IPC failed")),
+                };
+                let kind =
+                    Self::classify_ipc(timed_out, &probe).unwrap_or(ViolationKind::Infra);
                 self.kill_worker();
                 self.reap_worker().await;
-                if !self.record_violation(ViolationKind::Time, job) {
+                if !self.record_violation(kind, job) {
                     error!(
                         log_path = %self.config.log_path,
                         "Violation occurred but the signed record could not be persisted"
@@ -329,7 +369,7 @@ impl Supervisor {
                 }
                 // Best-effort respawn; ignore failure (caller gets Err).
                 let _ = self.spawn_worker();
-                Err(ViolationKind::Time)
+                Err(kind)
             }
         }
     }
@@ -420,8 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn test_containment_enforced_matches_platform() {
-        assert_eq!(
+    fn test_containment_enforced_matches_platform() {        assert_eq!(
             Supervisor::containment_enforced(),
             cfg!(target_os = "linux")
         );
@@ -503,5 +542,43 @@ mod tests {
         );
         assert!(std::fs::metadata(&log).is_ok(), "violation log must exist");
         let _ = std::fs::remove_file(&log);
+    }
+
+    #[test]
+    fn test_classify_ipc_exact_kinds() {
+        use std::io::{Error, ErrorKind};
+        // Elapsed deadline is always Time, whatever the pipe says.
+        assert_eq!(
+            Supervisor::classify_ipc(true, &Ok("anything".to_string())),
+            Some(ViolationKind::Time)
+        );
+        assert_eq!(
+            Supervisor::classify_ipc(
+                true,
+                &Err(Error::new(ErrorKind::BrokenPipe, "x"))
+            ),
+            Some(ViolationKind::Time)
+        );
+        // Dead pipe / EOF / empty answer without a timeout is Infra.
+        assert_eq!(
+            Supervisor::classify_ipc(
+                false,
+                &Err(Error::new(ErrorKind::BrokenPipe, "x"))
+            ),
+            Some(ViolationKind::Infra)
+        );
+        assert_eq!(
+            Supervisor::classify_ipc(false, &Ok(String::new())),
+            Some(ViolationKind::Infra)
+        );
+        assert_eq!(
+            Supervisor::classify_ipc(false, &Ok("   \n".to_string())),
+            Some(ViolationKind::Infra)
+        );
+        // Readable output is the caller's to parse: no violation yet.
+        assert_eq!(
+            Supervisor::classify_ipc(false, &Ok("{\"a\":1}".to_string())),
+            None
+        );
     }
 }

@@ -1124,7 +1124,14 @@ impl Ros2Node {
     }
 
     /// Publish an arbitrary velocity command (stub — logs [linear_x, angular_z]).
+    ///
+    /// Applies the same safety envelope as the live publisher (linear
+    /// ±2 m/s, angular ±π rad/s) so stub tests exercise the exact values
+    /// hardware would see — an unclamped value must never pass stub review
+    /// and then behave differently on the robot.
     pub async fn publish_velocity(&self, linear_x: f64, angular_z: f64) -> Result<()> {
+        let linear_x = linear_x.clamp(-2.0, 2.0);
+        let angular_z = angular_z.clamp(-std::f64::consts::PI, std::f64::consts::PI);
         debug!(
             "Publishing velocity (stub) linear_x={:.3} angular_z={:.3}",
             linear_x, angular_z
@@ -1494,8 +1501,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_cancel_navigation_cancels_live_goal() {
-        let config = Ros2Config {
+    async fn legacy_cancel_navigation_cancels_live_goal() {        let config = Ros2Config {
             enabled: true,
             enable_nav2: true,
             ..Default::default()
@@ -1519,6 +1525,22 @@ mod tests {
         let status = node.get_navigation_status().await.unwrap().unwrap();
         assert_eq!(status.status, "canceled");
         assert_eq!(status.state, NavigationState::Canceled);
+    }
+
+    #[tokio::test]
+    async fn stub_velocity_publisher_matches_live_envelope() {
+        let config = Ros2Config {
+            enabled: true,
+            ..Default::default()
+        };
+        let node = Ros2Node::new(config).await.unwrap();
+
+        node.publish_velocity(100.0, 100.0).await.unwrap();
+        assert_eq!(node.last_velocity().await, [2.0, std::f64::consts::PI]);
+        node.publish_velocity(-100.0, -100.0).await.unwrap();
+        assert_eq!(node.last_velocity().await, [-2.0, -std::f64::consts::PI]);
+        node.publish_spin_velocity(10.0).await.unwrap();
+        assert_eq!(node.last_velocity().await[1], std::f64::consts::PI);
     }
 
     #[tokio::test]

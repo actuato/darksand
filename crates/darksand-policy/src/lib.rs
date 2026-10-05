@@ -12,6 +12,8 @@
 //! active signing key, using the canonical scheme:
 //! `METHOD\nPATH\nKEY_VERSION\nSIGNED_AT_MS\nNONCE\nACTION\nhex(sha256(body))`.
 
+pub mod fleet;
+
 use anyhow::{Context, Result};
 use axum::{
     extract::{Path, State},
@@ -137,6 +139,7 @@ impl AppState {
     pub fn open(db_path: &str, keys: PolicyKeys) -> Result<Self> {
         let conn = Connection::open(db_path)?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(crate::fleet::FLEET_SCHEMA)?;
         Ok(Self {
             db: Arc::new(Mutex::new(conn)),
             keys,
@@ -146,6 +149,7 @@ impl AppState {
     pub fn open_memory(keys: PolicyKeys) -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(crate::fleet::FLEET_SCHEMA)?;
         Ok(Self {
             db: Arc::new(Mutex::new(conn)),
             keys,
@@ -1002,6 +1006,7 @@ async fn key_lifecycle(
 
 /// Build the router. Split out for tests.
 pub fn router(state: AppState) -> Router {
+    let fleet = fleet::fleet_routes();
     Router::new()
         .route("/health", get(health))
         .route("/v1/robotics/policies", get(list_policies).post(create_draft))
@@ -1024,6 +1029,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/robotics/policies/:version/expire", post(expire_policy))
         .route("/v1/robotics/policies/:version/revoke", post(revoke_policy))
+        .merge(fleet)
         .with_state(state)
 }
 
@@ -1333,5 +1339,152 @@ mod tests {
 
         // Active row exists, but enforcement sees through the expiry.
         assert!(super::active_policy(&state, TENANT).await.unwrap().is_none());
+    }
+
+    /// The fleet loop closes end-to-end against the live service: a real
+    /// (non-mock) agent registers with an Ed25519-signed payload, pulls
+    /// config, and uploads telemetry — all verified server-side.
+    #[tokio::test]
+    async fn fleet_loop_closes_end_to_end() {
+        use darksand_fleet::{FleetAgent, FleetConfig};
+
+        let keys = {
+            let mut map = HashMap::new();
+            map.insert(BEARER.to_string(), TENANT.to_string());
+            PolicyKeys(map)
+        };
+        let state = AppState::open_memory(keys).unwrap();
+        let app = router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // Isolate key material per test run (parallel-safe tempdir).
+        let keydir = std::env::temp_dir().join(format!(
+            "darksand_fleet_e2e_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::env::set_var("DARKSAND_FLEET_KEY_DIR", &keydir);
+
+        let agent = FleetAgent::new(FleetConfig {
+            enabled: true,
+            darksand_endpoint: format!("http://{addr}"),
+            agent_id: "e2e-agent-1".to_string(),
+            api_key: Some(BEARER.to_string()),
+            mock_mode: false,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let reg = agent.register().await.unwrap();
+        assert!(reg.success);
+        assert!(!reg.fleet_id.is_empty());
+
+        // Re-registration resumes the same fleet identity.
+        let reg2 = agent.register().await.unwrap();
+        assert_eq!(reg2.fleet_id, reg.fleet_id);
+
+        let sync = agent.sync_config().await.unwrap();
+        assert!(!sync.requires_restart);
+
+        // Repeated uploads with real metric maps all verify deterministically.
+        for _ in 0..3 {
+            agent.upload_telemetry().await.unwrap();
+        }
+
+        // Dashboard reads back the registered agent.
+        let overview = darksand_fleet::dashboard::get_fleet_overview(
+            &format!("http://{addr}"),
+            BEARER,
+        )
+        .await
+        .unwrap();
+        assert_eq!(overview.total_agents, 1);
+        assert_eq!(
+            overview.healthy_agents + overview.degraded_agents + overview.unhealthy_agents,
+            1
+        );
+
+        // Unknown fleet IDs fail closed.
+        let client = reqwest::Client::new();
+        let res = client
+            .get(format!("http://{addr}/api/fleet/nope/config"))
+            .header("X-API-Key", BEARER)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404);
+
+        // Unsigned registration is rejected.
+        let res = client
+            .post(format!("http://{addr}/api/fleet/register"))
+            .header("X-API-Key", BEARER)
+            .json(&serde_json::json!({
+                "agent_id": "ghost", "hostname": "h", "platform": "x",
+                "version": "0", "capabilities": [], "location": null,
+                "metadata": {}, "public_key": "", "signature": ""
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 401);
+
+        // Wrong-key telemetry is rejected.
+        let other_key = {
+            let dir = tempfile::tempdir().unwrap();
+            darksand_fleet::crypto::FleetKeypair::load_or_generate(dir.path().join("k")).unwrap()
+        };
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut fake = darksand_fleet::TelemetryData {
+            agent_id: "e2e-agent-1".to_string(),
+            timestamp: now_secs,
+            metrics: Default::default(),
+            logs: vec![],
+            status: darksand_fleet::AgentStatus {
+                health: "healthy".to_string(),
+                uptime_secs: 0,
+                cpu_usage_percent: 0.0,
+                memory_usage_mb: 0,
+                active_tasks: 0,
+            },
+            signature: None,
+        };
+        fake.signature = Some(
+            darksand_fleet::crypto::sign_payload(&other_key, &fake).unwrap(),
+        );
+        let res = client
+            .post(format!(
+                "http://{addr}/api/fleet/{}/telemetry",
+                reg.fleet_id
+            ))
+            .header("X-API-Key", BEARER)
+            .json(&fake)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 401);
+
+        // Deregister removes the agent from the inventory.
+        agent.deregister().await.unwrap();
+        let overview = darksand_fleet::dashboard::get_fleet_overview(
+            &format!("http://{addr}"),
+            BEARER,
+        )
+        .await
+        .unwrap();
+        assert_eq!(overview.total_agents, 0);
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(&keydir);
+        std::env::remove_var("DARKSAND_FLEET_KEY_DIR");
     }
 }

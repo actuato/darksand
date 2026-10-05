@@ -28,6 +28,26 @@ pub fn classify_error(error: &anyhow::Error) -> ErrorClass {
     }
 }
 
+/// Upper bound for any single backoff sleep. Recovery must never schedule a
+/// delay a human would mistake for a hang.
+pub const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Backoff delay for a retryable error class at `attempt` (1-based).
+///
+/// Saturating and capped: no shift overflow at large attempts, no 60 s
+/// surprise sleeps. `RateLimited` still backs off harder than plain
+/// retryable errors, but within the same cap.
+pub fn backoff_delay(class: ErrorClass, attempt: u32) -> Duration {
+    let base_ms: u64 = match class {
+        ErrorClass::Retryable => 100,
+        ErrorClass::RateLimited => 1_000,
+        ErrorClass::Fatal => return Duration::from_millis(0),
+    };
+    let exp = attempt.saturating_sub(1).min(10);
+    let delay_ms = base_ms.saturating_mul(1u64 << exp);
+    Duration::from_millis(delay_ms.min(MAX_BACKOFF.as_millis() as u64))
+}
+
 pub async fn retry_with_backoff<F, Fut, T>(mut operation: F, max_retries: usize) -> Result<T>
 where
     F: FnMut() -> Fut,
@@ -46,11 +66,7 @@ where
                     return Err(e);
                 }
 
-                let delay = match error_class {
-                    ErrorClass::RateLimited => Duration::from_secs(60),
-                    ErrorClass::Retryable => Duration::from_millis(100 * 2u64.pow(attempts as u32)),
-                    ErrorClass::Fatal => return Err(e),
-                };
+                let delay = backoff_delay(error_class, attempts as u32);
 
                 warn!(
                     "Retry attempt {}/{}, waiting {:?}",
@@ -370,5 +386,44 @@ pub mod robot {
 
     pub async fn run_standard_sequence() -> Result<RecoveryOutcome> {
         Ok(RecoveryOutcome::Skipped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_then_caps() {
+        assert_eq!(backoff_delay(ErrorClass::Retryable, 1), Duration::from_millis(100));
+        assert_eq!(backoff_delay(ErrorClass::Retryable, 2), Duration::from_millis(200));
+        assert_eq!(backoff_delay(ErrorClass::RateLimited, 1), Duration::from_secs(1));
+        // No overflow panic at absurd attempts, and the cap holds.
+        assert_eq!(backoff_delay(ErrorClass::Retryable, 64), MAX_BACKOFF);
+        assert_eq!(backoff_delay(ErrorClass::Retryable, u32::MAX), MAX_BACKOFF);
+        assert_eq!(backoff_delay(ErrorClass::RateLimited, u32::MAX), MAX_BACKOFF);
+        assert!(backoff_delay(ErrorClass::Retryable, 1000) <= MAX_BACKOFF);
+    }
+
+    #[test]
+    fn fatal_never_backs_off() {
+        assert_eq!(backoff_delay(ErrorClass::Fatal, 1), Duration::from_millis(0));
+        assert_eq!(backoff_delay(ErrorClass::Fatal, 99), Duration::from_millis(0));
+    }
+
+    #[test]
+    fn classify_error_buckets() {
+        assert_eq!(
+            classify_error(&anyhow::anyhow!("connection timed out")),
+            ErrorClass::Retryable
+        );
+        assert_eq!(
+            classify_error(&anyhow::anyhow!("rate limit exceeded")),
+            ErrorClass::RateLimited
+        );
+        assert_eq!(
+            classify_error(&anyhow::anyhow!("invalid goal")),
+            ErrorClass::Fatal
+        );
     }
 }
